@@ -53,9 +53,21 @@ final class AccountManager {
     }
 
     // MARK: - 활성 계정 판별
-    /// 데스크탑 앱이 보는 계정(bridge-state.json) 우선, 없으면 CLI(~/.claude.json).
+    /// 우선순위:
+    ///  1) config.json `lastKnownAccountUuid` — 데스크탑 앱이 계정 메뉴 전환 시 바로 갱신(가장 정확).
+    ///  2) bridge-state.json — Claude Code 원격 브리지(전환보다 뒤늦게 갱신).
+    ///  3) ~/.claude.json — CLI 세션이 실제로 돌 때만 갱신(가장 느림).
+    /// 데스크탑 UI 에서 계정을 바꾸면 2·3 은 한동안 옛 계정을 가리키므로 1 을 최우선으로 본다.
     func activeAccountUuid() -> String? {
-        bridgeActiveAccount() ?? claudeJsonIdentity()?.accountUuid
+        desktopActiveAccount() ?? bridgeActiveAccount() ?? claudeJsonIdentity()?.accountUuid
+    }
+
+    /// 데스크탑 앱이 config.json 에 기록하는 현재 로그인 계정.
+    func desktopActiveAccount() -> String? {
+        guard let data = try? Data(contentsOf: Paths.claudeConfig),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let acct = obj["lastKnownAccountUuid"] as? String, isUuid(acct) else { return nil }
+        return acct
     }
 
     func bridgeActiveAccount() -> String? {

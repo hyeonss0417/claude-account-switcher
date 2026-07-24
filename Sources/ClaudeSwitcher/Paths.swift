@@ -12,7 +12,10 @@ enum Paths {
     static var sessionsBase: URL {
         appSupportClaude.appending(path: "claude-code-sessions", directoryHint: .isDirectory)
     }
-    /// 데스크탑 앱이 현재 붙어있는 계정을 나타내는 브리지 상태
+    /// 데스크탑 앱이 자신의 현재 로그인 계정을 기록하는 곳(`lastKnownAccountUuid`).
+    /// 계정 메뉴에서 전환하면 갱신됨 → 데스크탑 활성 계정의 가장 신뢰할 만한 신호.
+    static var claudeConfig: URL { appSupportClaude.appending(path: "config.json") }
+    /// Claude Code 원격 브리지 상태(계정 전환보다 뒤늦게 갱신됨 → 보조 신호).
     static var bridgeState: URL { appSupportClaude.appending(path: "bridge-state.json") }
     /// 등록된 계정 UUID 목록
     static var deviceRegistry: URL { appSupportClaude.appending(path: "ant-device-registry.json") }

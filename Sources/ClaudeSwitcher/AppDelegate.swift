@@ -3,8 +3,9 @@ import Foundation
 import ServiceManagement
 
 /// 상단 메뉴바 아이콘 + 메뉴 구성 + 백그라운드 세션 동기화.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
+    private let menu = NSMenu()
     private let manager = AccountManager()
     private var syncTimer: Timer?
     private var autoSync = true
@@ -21,8 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = NSImage(systemSymbolName: "person.2.circle", accessibilityDescription: "Claude Account Switcher")
             button.image?.isTemplate = true
         }
+        menu.delegate = self
+        statusItem.menu = menu
         manager.captureActiveIdentity()
-        rebuildMenu()
+        populateMenu()
         startAutoSync()
     }
 
@@ -42,16 +45,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let n = SessionSync.syncAll(folders: folders)
             if n > 0 { Log.info("자동 동기화: \(n)개 복사") }
             DispatchQueue.main.async {
-                self?.rebuildMenu()
                 if !quiet { self?.setStatus("세션 동기화 완료 — \(n)개 통합") }
             }
         }
     }
 
-    // MARK: - 메뉴
-    private func rebuildMenu() {
+    // MARK: - 메뉴 (열 때마다 재구성 → 데스크탑 계정 전환을 즉시 반영)
+    func menuNeedsUpdate(_ menu: NSMenu) { populateMenu() }
+
+    private func populateMenu() {
         manager.refreshFromDisk()
-        let menu = NSMenu()
+        menu.removeAllItems()
         let active = manager.activeAccountUuid()
 
         let header = NSMenuItem(title: "Claude 계정 전환기", action: nil, keyEquivalent: "")
@@ -85,8 +89,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addItem(to: menu, "로그 열기", #selector(openLog))
         menu.addItem(.separator())
         addItem(to: menu, "종료", #selector(quit), key: "q")
-
-        statusItem.menu = menu
     }
 
     @discardableResult
@@ -120,11 +122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             a2.runModal()
         }
         setStatus(result.message)
-        rebuildMenu()
+        populateMenu()
     }
 
     @objc private func syncNow() { runSyncInBackground(quiet: false) }
-    @objc private func toggleAutoSync() { autoSync.toggle(); startAutoSync(); rebuildMenu() }
+    @objc private func toggleAutoSync() { autoSync.toggle(); startAutoSync(); populateMenu() }
 
     // 로그인 항목(SMAppService). 메뉴바 도구가 항상 켜져 있어야 동기화가 상시 동작한다.
     private var launchAtLoginEnabled: Bool { SMAppService.mainApp.status == .enabled }
@@ -137,12 +139,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setStatus("로그인 항목 설정 실패 — 시스템 설정 > 일반 > 로그인 항목에서 수동 추가")
             Log.error("launchAtLogin 토글 실패: \(error.localizedDescription)")
         }
-        rebuildMenu()
+        populateMenu()
     }
     @objc private func captureNow() {
         let ok = manager.captureActiveProfile()
         setStatus(ok ? "현재 계정 포착됨" : "포착 실패 — 로그 확인")
-        rebuildMenu()
+        populateMenu()
     }
     @objc private func openBackups() { NSWorkspace.shared.open(Paths.backupsDir) }
     @objc private func openLog() { NSWorkspace.shared.open(Paths.logFile) }

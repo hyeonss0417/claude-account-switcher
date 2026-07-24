@@ -23,7 +23,19 @@ enum Keychain {
         upsert(service: profileService, account: accountUuid, data: data)
     }
     static func loadProfileCredential(accountUuid: String) -> Data? { read(service: profileService, account: accountUuid) }
-    static func hasProfileCredential(accountUuid: String) -> Bool { loadProfileCredential(accountUuid: accountUuid) != nil }
+
+    /// 존재 여부만 확인. **비밀 데이터(kSecReturnData)를 요청하지 않으므로 Keychain 허용 창이 뜨지 않는다.**
+    /// ⚠️ 메뉴 렌더링처럼 자주 호출되는 곳에서는 loadProfileCredential(데이터 읽기 → ACL 프롬프트) 대신 이걸 쓸 것.
+    static func hasProfileCredential(accountUuid: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: profileService,
+            kSecAttrAccount as String: accountUuid,
+            kSecReturnData as String: false,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
 
     // MARK: - low level
     private static func read(service: String, account: String) -> Data? {

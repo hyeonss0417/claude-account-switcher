@@ -8,6 +8,7 @@ enum Diagnostics {
         print("=== Claude Account Switcher — 진단 ===")
         print("세션 베이스: \(Paths.sessionsBase.path)")
         print("활성 계정(UUID): \(active ?? "(판별 실패)")")
+        print("  · config.json(데스크탑) 기준: \(m.desktopActiveAccount() ?? "-")")
         print("  · bridge-state 기준: \(m.bridgeActiveAccount() ?? "-")")
         print("  · ~/.claude.json 기준: \(m.claudeJsonIdentity()?.accountUuid ?? "-")  (\(m.claudeJsonIdentity()?.emailAddress ?? "-"))")
         print("")
