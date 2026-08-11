@@ -42,10 +42,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func runSyncInBackground(quiet: Bool) {
         let folders = manager.discoverFolders().map(\.url)
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let n = SessionSync.syncAll(folders: folders)
-            if n > 0 { Log.info("자동 동기화: \(n)개 복사") }
+            let r = SessionSync.syncAll(folders: folders)
+            if r.copied > 0 { Log.info("자동 동기화: \(r.copied)개 복사") }
             DispatchQueue.main.async {
-                if !quiet { self?.setStatus("세션 동기화 완료 — \(n)개 통합") }
+                if !quiet {
+                    self?.setStatus("동기화 완료 — \(r.copied)개 통합, 빈 세션 \(r.skippedDead)개 제외")
+                }
             }
         }
     }
@@ -67,8 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for profile in sorted {
             let count = manager.sessionCount(accountUuid: profile.accountUuid, orgUuid: profile.organizationUuid)
             let isActive = profile.accountUuid == active
-            let hasCred = Keychain.hasProfileCredential(accountUuid: profile.accountUuid)
-            let credMark = hasCred ? "" : "  · 로그인 필요"
+            // 웹세션 스냅샷이 있어야 데스크탑 로그인까지 원클릭 전환된다.
+            let ready = WebSession.hasSnapshot(accountUuid: profile.accountUuid)
+            let credMark = (isActive || ready) ? "" : "  · 최초 1회 로그인 필요"
             let item = NSMenuItem(title: "\(profile.displayLabel) — \(count) 세션\(credMark)",
                                   action: #selector(switchAccount(_:)), keyEquivalent: "")
             item.target = self
@@ -84,7 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let login = addItem(to: menu, "로그인 시 자동 실행", #selector(toggleLaunchAtLogin))
         login.state = launchAtLoginEnabled ? .on : .off
         menu.addItem(.separator())
-        addItem(to: menu, "현재 계정 포착(전환 대상 등록)", #selector(captureNow))
+        addItem(to: menu, "현재 로그인 저장(전환 대상 등록)", #selector(captureNow))
+        addItem(to: menu, "빈 세션 정리(죽은 인덱스 격리)", #selector(cleanDead))
         addItem(to: menu, "백업 폴더 열기", #selector(openBackups))
         addItem(to: menu, "로그 열기", #selector(openLog))
         menu.addItem(.separator())
@@ -107,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "\(target.displayLabel) 계정으로 전환할까요?"
-        alert.informativeText = "먼저 모든 세션을 백업·동기화한 뒤 Claude 를 재기동합니다."
+        alert.informativeText = "백업·동기화 후 Claude 를 종료했다가 다시 켭니다. (작업 중인 내용은 저장해 주세요)"
         alert.addButton(withTitle: "전환")
         alert.addButton(withTitle: "취소")
         NSApp.activate(ignoringOtherApps: true)
@@ -117,8 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if result.needsGuidedLogin {
             let a2 = NSAlert()
             a2.messageText = result.message
-            a2.informativeText = "Claude 가 재기동되면 \(target.displayLabel) 로 로그인하세요. 이후에는 이 계정도 한 번의 클릭으로 전환됩니다."
+            a2.informativeText = """
+                이 계정은 아직 저장된 로그인 정보가 없습니다.
+                Claude 가 켜지면 \(target.displayLabel) 로 한 번만 로그인한 뒤,
+                메뉴에서 「현재 로그인 저장」을 눌러주세요. 다음부터는 원클릭으로 전환됩니다.
+                """
             a2.addButton(withTitle: "확인")
+            NSApp.activate(ignoringOtherApps: true)
             a2.runModal()
         }
         setStatus(result.message)
@@ -141,9 +150,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         populateMenu()
     }
+    /// 현재 로그인(웹세션 + CLI 식별/자격증명)을 현재 계정 프로필로 저장 → 이후 원클릭 전환 가능.
     @objc private func captureNow() {
-        let ok = manager.captureActiveProfile()
-        setStatus(ok ? "현재 계정 포착됨" : "포착 실패 — 로그 확인")
+        manager.captureActiveIdentity()
+        manager.captureActiveCredential()
+        let alert = NSAlert()
+        alert.messageText = "현재 로그인을 저장할까요?"
+        alert.informativeText = "웹세션을 저장하려면 Claude 를 잠시 종료했다가 다시 켭니다."
+        alert.addButton(withTitle: "저장")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let ok = AuthSwitcher.captureCurrentWebSession(manager: manager)
+        setStatus(ok ? "현재 로그인 저장됨 — 이제 원클릭 전환 가능" : "저장 실패 — 로그 확인")
+        populateMenu()
+    }
+
+    /// 대화 로그가 사라진 "죽은 인덱스"를 백업으로 격리 → 빈 세션이 목록에서 사라진다.
+    @objc private func cleanDead() {
+        let folders = manager.discoverFolders().map(\.url)
+        let alert = NSAlert()
+        alert.messageText = "빈 세션을 정리할까요?"
+        alert.informativeText = "대화 로그가 사라진 세션 항목만 백업 폴더로 옮깁니다(삭제 아님).\n정리 후 Claude 를 재시작하면 목록에 반영됩니다."
+        alert.addButton(withTitle: "정리")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let n = SessionSync.quarantineDeadIndexes(folders: folders)
+        setStatus("빈 세션 \(n)개 격리 완료")
         populateMenu()
     }
     @objc private func openBackups() { NSWorkspace.shared.open(Paths.backupsDir) }

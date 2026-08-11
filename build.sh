@@ -37,9 +37,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 애드혹 서명 (Keychain ACL 안정성 위해). 실패해도 계속.
-codesign --force --sign - "$APP/Contents/MacOS/$BIN" 2>/dev/null || true
-codesign --force --sign - "$APP" 2>/dev/null || true
+# 서명: 고정 자체서명 인증서가 있으면 그것으로(→ Keychain "항상 허용"이 재빌드 후에도 유지됨),
+# 없으면 ad-hoc 으로 폴백(→ 재빌드마다 허용 창이 다시 뜰 수 있음).
+SIGN_CN="ClaudeSwitcher Self-Signed"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_CN"; then
+  echo "==> 서명: $SIGN_CN (고정 식별자)"
+  codesign --force --deep --sign "$SIGN_CN" "$APP" 2>/dev/null \
+    || { echo "   서명 실패 → ad-hoc 폴백"; codesign --force --deep --sign - "$APP" 2>/dev/null || true; }
+else
+  echo "==> 서명: ad-hoc (고정 인증서 없음 — 'bash setup-signing.sh' 실행 권장)"
+  codesign --force --deep --sign - "$APP" 2>/dev/null || true
+fi
 
 echo "==> 완료: $APP"
 echo "실행: open \"$APP\""

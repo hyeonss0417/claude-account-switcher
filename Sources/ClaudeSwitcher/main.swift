@@ -9,8 +9,11 @@ if cliArgs.contains("--diagnose") {
 if cliArgs.contains("--sync") {
     let m = AccountManager()
     let folders = m.discoverFolders().map(\.url)
-    let n = SessionSync.syncAll(folders: folders)
-    print("동기화 완료: \(folders.count)개 폴더에 걸쳐 \(n)개 인덱스 복사")
+    let r = SessionSync.syncAll(folders: folders)
+    print("동기화 완료: 폴더 \(folders.count)개")
+    print("  복사: \(r.copied)")
+    print("  죽은 인덱스 제외(빈 세션 방지): \(r.skippedDead)")
+    print("  쓰는중 건너뜀: \(r.skippedBusy)   실패: \(r.failed)")
     exit(0)
 }
 

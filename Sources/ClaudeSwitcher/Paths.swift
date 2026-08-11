@@ -22,6 +22,14 @@ enum Paths {
 
     // CLI/공유 식별 정보
     static var claudeJson: URL { home.appending(path: ".claude.json") }
+    /// 실제 대화 로그가 사는 곳(계정 무관 공유). `<인코딩된 cwd>/<sessionId>.jsonl`
+    static var projectsDir: URL { home.appending(path: ".claude/projects", directoryHint: .isDirectory) }
+
+    // 데스크탑 웹세션(= 데스크탑 로그인 계정의 실체)
+    static var cookies: URL { appSupportClaude.appending(path: "Cookies") }
+    static var cookiesJournal: URL { appSupportClaude.appending(path: "Cookies-journal") }
+    static var localStorage: URL { appSupportClaude.appending(path: "Local Storage", directoryHint: .isDirectory) }
+    static var sessionStorage: URL { appSupportClaude.appending(path: "Session Storage", directoryHint: .isDirectory) }
 
     // 이 앱 전용 저장소 (~/.claude-account-switcher)
     static var appDir: URL {

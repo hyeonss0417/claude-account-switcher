@@ -23,10 +23,11 @@ When you switch to another account, its folder is empty — so **all your sessio
 - **Menu-bar status** — each account with its live session count and which one is active.
 - **Automatic session union-sync** (every 30s) — the "disappearing sessions" bug never bites again.
 - **Timestamped backups** before any change — snapshots the session folder + `~/.claude.json` (keeps the last 10).
-- **Account switching**:
-  - *Auto* — swaps the saved OAuth credential (Keychain) + `~/.claude.json`, instantly switching the **CLI (`claude` in Terminal)** account.
-  - *Guided fallback* — the desktop app manages its account via its own web login, so the tool backs up, syncs, relaunches Claude, and you pick the account once in the app. After that, that account is captured for one-click switching too.
+- **Real account switching** — snapshots and restores the desktop's **web session** (the `sessionKey` cookies + Local/Session Storage that actually hold your login), plus the CLI identity (`~/.claude.json`) and Keychain credential. Once an account has been captured, switching to it logs you straight in — no manual login.
+  - First time only: log into the account once, then hit **"현재 로그인 저장" (Save current login)**. From then on it's one click.
+- **Empty-session protection** — a session index whose conversation log is gone (deleted worktree, etc.) is **never propagated** to another account, so switching can't produce sessions that open blank. Use **"빈 세션 정리"** to quarantine ones that already spread.
 - **Launch at login** toggle, so sync is always running.
+- **Stable code signing** (`setup-signing.sh`) — so macOS's Keychain "Always Allow" actually sticks instead of re-prompting on every switch.
 - **Headless modes** for debugging: `--diagnose`, `--sync`.
 
 ## How it works
@@ -52,11 +53,13 @@ Because logs and memory are already shared, the **only** thing needed for contex
 ```bash
 git clone https://github.com/hyeonss0417/claude-account-switcher.git
 cd claude-account-switcher
+bash setup-signing.sh  # once: stable self-signed cert so "Always Allow" persists
 bash build.sh          # release build → ~/Applications/Claude Account Switcher.app
 open ~/Applications/"Claude Account Switcher.app"
 ```
 
-- On the first switch/capture, macOS shows a Keychain **"Always Allow"** prompt once — allow it.
+- On the first switch/capture, macOS shows a Keychain **"Always Allow"** prompt — click it once (with `setup-signing.sh` done, it won't come back).
+- Switching **quits and relaunches Claude** (required to safely swap the web session), so save your work first.
 - Enable **"Launch at login"** from the menu so sync runs whenever you're working.
 
 ## Usage
@@ -73,7 +76,8 @@ Sync sessions now                (⌘S)
 Auto-sync (30s)                   ✓
 Launch at login                   ✓
 ──────────────────────────
-Capture current account
+Save current login
+Clean up empty sessions
 Open backups folder
 Open log
 ──────────────────────────
@@ -104,8 +108,9 @@ Click an account to switch to it (you'll get a confirm dialog; it backs up + syn
 
 ## Caveats
 
-- **CLI vs Desktop:** the auto-switch reliably flips the **CLI** account. The **desktop app** decides its account from its own web login, so a desktop switch relaunches Claude and you select the account in its UI once. (No fragile cookie surgery — by design.)
-- **Ad-hoc signing:** `build.sh` signs the app ad-hoc, so after each rebuild the Keychain "Allow" prompt appears once more. Fine for a personal build; sign with a Developer ID if you want it to persist.
+- **Claude restarts on every switch.** Swapping the web session requires the app to be fully quit, so the switcher quits and relaunches it. Any Claude Code session running inside the desktop app will be interrupted.
+- **One manual login per account, once.** Until an account's web session has been captured, switching to it can only get you to the login screen.
+- **Run `setup-signing.sh`.** Without it the app is ad-hoc signed, its code identity changes on every rebuild, and macOS re-prompts for Keychain access on every switch.
 
 ## License
 
@@ -134,10 +139,11 @@ Claude 데스크탑은 Claude Code **세션 목록을 계정별 폴더**에 저�
 - **메뉴바 상태** — 계정별 세션 수 + 현재 활성 계정 표시.
 - **세션 합집합 자동 동기화** (30초 주기) — 세션이 다시는 "사라지지" 않는다.
 - **전환 전 자동 백업** — 세션 폴더 + `~/.claude.json` 타임스탬프 스냅샷(최근 10개 보관).
-- **계정 전환**:
-  - *자동* — 저장된 OAuth 자격증명(Keychain) + `~/.claude.json` 을 교체해 **터미널 `claude`(CLI)** 계정을 즉시 전환.
-  - *가이드 폴백* — 데스크탑 앱은 자체 웹 로그인으로 계정을 관리하므로, 백업·동기화·재기동 후 앱에서 해당 계정을 한 번 고르면 된다. 이후엔 그 계정도 원클릭 전환된다.
+- **진짜 계정 전환** — 데스크탑 로그인의 실체인 **웹세션**(`sessionKey` 쿠키 + Local/Session Storage)을 계정별로 스냅샷·복원하고, CLI 식별(`~/.claude.json`)과 Keychain 자격증명도 함께 교체한다. 한 번 저장된 계정은 클릭 한 번으로 **바로 로그인된 상태**로 전환된다.
+  - 최초 1회만: 그 계정으로 로그인한 뒤 메뉴의 **「현재 로그인 저장」** 을 누르면 끝.
+- **빈 세션 방지** — 대화 로그가 사라진 인덱스(삭제된 worktree 등)는 **다른 계정으로 복사하지 않는다.** 전환 후 열면 비어있는 세션이 생기지 않는다. 이미 퍼진 것은 **「빈 세션 정리」** 로 격리.
 - **로그인 시 자동 실행** 토글 — 동기화가 항상 돌게.
+- **고정 코드서명**(`setup-signing.sh`) — Keychain "항상 허용"이 재빌드 후에도 유지되어 전환할 때마다 암호를 묻지 않는다.
 - **헤드리스 디버그 모드**: `--diagnose`, `--sync`.
 
 ### 동작 원리
@@ -163,11 +169,13 @@ Claude 데스크탑은 Claude Code **세션 목록을 계정별 폴더**에 저�
 ```bash
 git clone https://github.com/hyeonss0417/claude-account-switcher.git
 cd claude-account-switcher
+bash setup-signing.sh  # 최초 1회: 고정 자체서명 인증서 ("항상 허용"이 유지되도록)
 bash build.sh          # 릴리스 빌드 → ~/Applications/Claude Account Switcher.app
 open ~/Applications/"Claude Account Switcher.app"
 ```
 
-- 첫 전환/포착 때 Keychain **"항상 허용"** 창이 한 번 뜬다 → 허용.
+- 첫 전환/저장 때 Keychain **"항상 허용"** 창이 한 번 뜬다 → 한 번만 눌러주면 (setup-signing.sh 를 했다면) 다시 뜨지 않는다.
+- 전환하면 **Claude 가 종료됐다 다시 켜진다**(웹세션을 안전하게 교체하려면 필수) — 작업 저장 후 진행할 것.
 - 메뉴에서 **"로그인 시 자동 실행"** 을 켜면 동기화가 상시 동작한다.
 
 ### 사용
@@ -184,7 +192,8 @@ Claude 계정 전환기
 자동 동기화 (30초)                ✓
 로그인 시 자동 실행               ✓
 ──────────────────────────
-현재 계정 포착
+현재 로그인 저장
+빈 세션 정리
 백업 폴더 열기
 로그 열기
 ──────────────────────────
@@ -215,8 +224,9 @@ Claude 계정 전환기
 
 ### 유의점
 
-- **CLI vs 데스크탑:** 자동 전환은 **CLI** 계정을 확실히 바꾼다. **데스크탑 앱**은 자체 웹 로그인으로 계정을 정하므로, 데스크탑 전환은 Claude 를 재기동한 뒤 앱 UI 에서 한 번 계정을 고르는 방식이다(불안정한 쿠키 조작 없음 — 의도된 설계).
-- **애드혹 서명:** `build.sh` 는 애드혹 서명이라, 재빌드마다 Keychain "허용" 창이 한 번씩 다시 뜬다. 개인용으로는 충분하며, 영구화하려면 Developer ID 로 서명.
+- **전환할 때마다 Claude 가 재시작된다.** 웹세션 교체는 앱이 완전히 종료된 상태에서만 안전하므로 종료→복원→재기동한다. 데스크탑 앱 안에서 돌던 Claude Code 세션은 중단된다.
+- **계정당 최초 1회 수동 로그인 필요.** 그 계정의 웹세션이 저장되기 전까지는 전환해도 로그인 화면까지만 간다.
+- **`setup-signing.sh` 를 꼭 실행.** 안 하면 ad-hoc 서명이라 재빌드마다 코드 신원이 바뀌어 전환 때마다 Keychain 창이 다시 뜬다.
 
 ### 라이선스
 
