@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let manager = AccountManager()
     private var syncTimer: Timer?
     private var autoSync = true
+    private var watcher: FolderWatcher?
+    private var lifecycleObserved = false
 
     /// 메뉴바가 꽉 차서 상태 아이콘을 누르기 어려울 때를 위한 Dock 아이콘 표시 옵션.
     private static let dockIconKey = "showDockIcon"
@@ -39,16 +41,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - 동기화
     private func startAutoSync() {
         syncTimer?.invalidate()
-        guard autoSync else { return }
+        guard autoSync else { watcher?.stop(); return }
         syncTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.runSyncInBackground(quiet: true)
         }
+        startWatching()
+        observeClaudeLifecycle()
         runSyncInBackground(quiet: true)
+    }
+
+    /// 세션 폴더에 변화가 생기면 즉시 동기화(폴링 30초 창을 메운다).
+    private func startWatching() {
+        let folders = manager.discoverFolders().map(\.url)
+        let roots = Set(folders.map { $0.deletingLastPathComponent() }) // 계정 루트
+        watcher = FolderWatcher { [weak self] in
+            DispatchQueue.main.async { self?.runSyncInBackground(quiet: true) }
+        }
+        watcher?.watch(Array(roots) + folders)
+    }
+
+    /// Claude 는 **시작할 때만** 세션 폴더를 스캔한다.
+    /// → 종료 시점에 동기화해 두면 다음 실행에서 전부 보이고, 실행 직후에도 한 번 맞춘다.
+    private func observeClaudeLifecycle() {
+        guard !lifecycleObserved else { return }
+        lifecycleObserved = true
+        let nc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didLaunchApplicationNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                guard app?.bundleIdentifier == AuthSwitcher.claudeBundleId else { return }
+                Log.info("Claude \(name == NSWorkspace.didLaunchApplicationNotification ? "실행" : "종료") 감지 → 동기화")
+                self?.runSyncInBackground(quiet: true)
+            }
+        }
+    }
+
+    /// 죽은 인덱스를 동기화 때마다 자동 격리할지. 켜두면 계정 간 세션 수가 항상 같게 유지된다.
+    private static let autoCleanKey = "autoCleanDeadIndexes"
+    private var autoCleanDead: Bool {
+        get { UserDefaults.standard.object(forKey: Self.autoCleanKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.autoCleanKey) }
     }
 
     private func runSyncInBackground(quiet: Bool) {
         let folders = manager.discoverFolders().map(\.url)
+        let clean = autoCleanDead
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            // 로그가 사라진 인덱스를 먼저 격리 → 계정 간 세션 수가 어긋나지 않는다.
+            if clean {
+                let q = SessionSync.quarantineDeadIndexes(folders: folders)
+                if q > 0 { Log.info("자동 정리: 빈 세션 \(q)개 격리") }
+            }
             let r = SessionSync.syncAll(folders: folders)
             if r.copied > 0 { Log.info("자동 동기화: \(r.copied)개 복사") }
             DispatchQueue.main.async {
@@ -138,6 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = launchAtLoginEnabled ? .on : .off
         let dock = addItem(to: menu, "Dock 아이콘 표시", #selector(toggleDockIcon))
         dock.state = showDockIcon ? .on : .off
+        let clean = addItem(to: menu, "빈 세션 자동 정리", #selector(toggleAutoClean))
+        clean.state = autoCleanDead ? .on : .off
         menu.addItem(.separator())
         addItem(to: menu, "현재 로그인 저장(전환 대상 등록)", #selector(captureNow))
         addItem(to: menu, "빈 세션 정리(죽은 인덱스 격리)", #selector(cleanDead))
@@ -187,6 +233,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func syncNow() { runSyncInBackground(quiet: false) }
+    @objc private func toggleAutoClean() {
+        autoCleanDead.toggle()
+        setStatus("빈 세션 자동 정리: \(autoCleanDead ? "켜짐" : "꺼짐")")
+    }
 
     /// Dock 아이콘 표시 토글. 켜면 Dock 아이콘 클릭만으로 메뉴를 열 수 있다
     /// (메뉴바가 꽉 차 상태 아이콘을 누르기 어려울 때 유용).

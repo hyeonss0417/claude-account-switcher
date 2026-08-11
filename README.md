@@ -21,11 +21,11 @@ When you switch to another account, its folder is empty — so **all your sessio
 ## Features
 
 - **Menu-bar status** — each account with its live session count and which one is active.
-- **Automatic session union-sync** (every 30s) — the "disappearing sessions" bug never bites again.
+- **Automatic session union-sync** — runs on a 30s timer, *and* the moment a session folder changes, *and* when Claude launches or quits. That last one matters: Claude only scans its session folder at launch, so syncing on quit guarantees the next launch sees everything.
 - **Timestamped backups** before any change — snapshots the session folder + `~/.claude.json` (keeps the last 10).
 - **Real account switching** — snapshots and restores the desktop's **web session** (the `sessionKey` cookies + Local/Session Storage that actually hold your login), plus the CLI identity (`~/.claude.json`) and Keychain credential. Once an account has been captured, switching to it logs you straight in — no manual login.
   - First time only: log into the account once, then hit **"현재 로그인 저장" (Save current login)**. From then on it's one click.
-- **Empty-session protection** — a session index whose conversation log is gone (deleted worktree, etc.) is **never propagated** to another account, so switching can't produce sessions that open blank. Use **"빈 세션 정리"** to quarantine ones that already spread.
+- **Empty-session protection** — a session index whose conversation log is gone (deleted worktree, etc.) is **never propagated**, and by default is **quarantined into backups on every sync**, so accounts keep identical session counts instead of drifting apart. Toggle with "빈 세션 자동 정리".
 - **Launch at login** toggle, so sync is always running.
 - **Dock icon** (on by default) — click it to pop the menu open at your cursor, for when the menu bar is too crowded to hit the status icon. Turn it off to go menu-bar-only.
 - **Stable code signing** (`setup-signing.sh`) — so macOS's Keychain "Always Allow" actually sticks instead of re-prompting on every switch.
@@ -77,6 +77,7 @@ Sync sessions now                (⌘S)
 Auto-sync (30s)                   ✓
 Launch at login                   ✓
 Show Dock icon                    ✓
+Auto-clean empty sessions         ✓
 ──────────────────────────
 Save current login
 Clean up empty sessions
@@ -93,6 +94,7 @@ Click an account to switch to it (you'll get a confirm dialog; it backs up + syn
 ```bash
 .build/release/ClaudeSwitcher --diagnose   # print accounts, active, session counts (read-only)
 .build/release/ClaudeSwitcher --sync       # run one union-sync pass
+.build/release/ClaudeSwitcher --clean-dead # quarantine indexes whose log is gone
 ```
 
 ## Data & backup locations
@@ -139,11 +141,11 @@ Claude 데스크탑은 Claude Code **세션 목록을 계정별 폴더**에 저�
 ### 기능
 
 - **메뉴바 상태** — 계정별 세션 수 + 현재 활성 계정 표시.
-- **세션 합집합 자동 동기화** (30초 주기) — 세션이 다시는 "사라지지" 않는다.
+- **세션 합집합 자동 동기화** — 30초 주기 + **폴더 변화 즉시** + **Claude 실행/종료 시점**. 특히 Claude 는 **시작할 때만** 세션 폴더를 스캔하므로, 종료 시 동기화해 두는 것이 다음 실행에서 전부 보이게 하는 핵심이다.
 - **전환 전 자동 백업** — 세션 폴더 + `~/.claude.json` 타임스탬프 스냅샷(최근 10개 보관).
 - **진짜 계정 전환** — 데스크탑 로그인의 실체인 **웹세션**(`sessionKey` 쿠키 + Local/Session Storage)을 계정별로 스냅샷·복원하고, CLI 식별(`~/.claude.json`)과 Keychain 자격증명도 함께 교체한다. 한 번 저장된 계정은 클릭 한 번으로 **바로 로그인된 상태**로 전환된다.
   - 최초 1회만: 그 계정으로 로그인한 뒤 메뉴의 **「현재 로그인 저장」** 을 누르면 끝.
-- **빈 세션 방지** — 대화 로그가 사라진 인덱스(삭제된 worktree 등)는 **다른 계정으로 복사하지 않는다.** 전환 후 열면 비어있는 세션이 생기지 않는다. 이미 퍼진 것은 **「빈 세션 정리」** 로 격리.
+- **빈 세션 방지 + 세션 수 일치** — 대화 로그가 사라진 인덱스는 **복사하지 않고**, 기본값으로 **동기화마다 백업 폴더로 자동 격리**한다. 그래서 계정 간 세션 수가 벌어지지 않는다(끄려면 「빈 세션 자동 정리」). 수동 정리는 「빈 세션 정리」.
 - **로그인 시 자동 실행** 토글 — 동기화가 항상 돌게.
 - **Dock 아이콘**(기본 켜짐) — 메뉴바가 꽉 차 상태 아이콘을 누르기 어려울 때, Dock 아이콘을 클릭하면 **마우스 위치에 메뉴가 바로 뜬다.** 끄면 메뉴바 전용으로 동작.
 - **고정 코드서명**(`setup-signing.sh`) — Keychain "항상 허용"이 재빌드 후에도 유지되어 전환할 때마다 암호를 묻지 않는다.
@@ -195,6 +197,7 @@ Claude 계정 전환기
 자동 동기화 (30초)                ✓
 로그인 시 자동 실행               ✓
 Dock 아이콘 표시                  ✓
+빈 세션 자동 정리                 ✓
 ──────────────────────────
 현재 로그인 저장
 빈 세션 정리
@@ -211,6 +214,7 @@ Dock 아이콘 표시                  ✓
 ```bash
 .build/release/ClaudeSwitcher --diagnose   # 계정·활성·세션수 출력 (읽기 전용)
 .build/release/ClaudeSwitcher --sync       # 합집합 1회 동기화
+.build/release/ClaudeSwitcher --clean-dead # 로그 없는 인덱스 격리
 ```
 
 ### 데이터 / 백업 위치

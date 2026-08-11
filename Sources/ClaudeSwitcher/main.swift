@@ -17,6 +17,19 @@ if cliArgs.contains("--sync") {
     exit(0)
 }
 
+if cliArgs.contains("--clean-dead") {
+    let m = AccountManager()
+    let folders = m.discoverFolders().map(\.url)
+    let n = SessionSync.quarantineDeadIndexes(folders: folders)
+    print("빈 세션(죽은 인덱스) \(n)개를 백업 폴더로 격리했습니다.")
+    for f in folders {
+        let c = (try? FileManager.default.contentsOfDirectory(atPath: f.path))?
+            .filter { $0.hasPrefix("local_") && $0.hasSuffix(".json") }.count ?? 0
+        print("  \(f.deletingLastPathComponent().lastPathComponent.prefix(8))/\(f.lastPathComponent.prefix(8)): \(c)")
+    }
+    exit(0)
+}
+
 // 메뉴바 전용 앱(LSUIElement). Dock/메뉴바 없이 상단 status item 만 띄운다.
 let app = NSApplication.shared
 let delegate = AppDelegate()
