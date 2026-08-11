@@ -187,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         addItem(to: menu, "현재 로그인 저장(전환 대상 등록)", #selector(captureNow))
         addItem(to: menu, "빈 세션 정리(죽은 인덱스 격리)", #selector(cleanDead))
+        addItem(to: menu, "가려진 세션 복구(worktree 재활용)", #selector(unshadowNow))
         addItem(to: menu, "백업 폴더 열기", #selector(openBackups))
         addItem(to: menu, "로그 열기", #selector(openLog))
         menu.addItem(.separator())
@@ -290,6 +291,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setStatus("빈 세션 \(n)개 격리 완료")
         populateMenu()
     }
+    /// worktree 재활용으로 목록에서 가려진 세션을 되살린다(원본 비파괴, 새 항목 추가).
+    @objc private func unshadowNow() {
+        let folders = manager.discoverFolders().map(\.url)
+        guard let first = folders.first else { return }
+        let found = ShadowedSessions.find(in: first)
+        let alert = NSAlert()
+        if found.isEmpty {
+            alert.messageText = "가려진 세션이 없습니다."
+            alert.informativeText = "worktree 를 여러 세션이 공유해 목록에서 밀려난 세션이 없습니다."
+            alert.addButton(withTitle: "확인")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+        alert.messageText = "가려진 세션 \(found.count)개를 복구할까요?"
+        alert.informativeText = """
+            worktree 가 재활용되면 같은 폴더를 쓰던 예전 세션이 목록에서 밀려납니다.
+            대화 로그를 본체 저장소 폴더로 복사하고 「(복구)」 항목으로 다시 띄웁니다.
+            원본은 지우지 않습니다. 복구 후 Claude 를 재시작해야 보입니다.
+            """
+        alert.addButton(withTitle: "복구")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let n = ShadowedSessions.unshadow(folders: folders)
+        setStatus("가려진 세션 \(n)개 복구 — Claude 재시작 후 표시")
+        let done = NSAlert()
+        done.messageText = "\(n)개 복구 완료"
+        done.informativeText = "Claude 를 재시작하면 「… (복구)」 항목으로 나타납니다."
+        done.addButton(withTitle: "확인")
+        done.runModal()
+        populateMenu()
+    }
+
     @objc private func openBackups() { NSWorkspace.shared.open(Paths.backupsDir) }
     @objc private func openLog() { NSWorkspace.shared.open(Paths.logFile) }
     @objc private func quit() { NSApp.terminate(nil) }

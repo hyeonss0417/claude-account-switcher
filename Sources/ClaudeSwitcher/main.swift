@@ -30,6 +30,23 @@ if cliArgs.contains("--clean-dead") {
     exit(0)
 }
 
+if cliArgs.contains("--find-shadowed") || cliArgs.contains("--unshadow") {
+    let m = AccountManager()
+    let folders = m.discoverFolders().map(\.url)
+    guard let first = folders.first else { print("계정 폴더 없음"); exit(1) }
+    let found = ShadowedSessions.find(in: first)
+    print("worktree 재활용으로 가려진 세션: \(found.count)개")
+    for s in found.prefix(30) { print("  · \(s.title)   [worktree \(s.worktreeName)]") }
+    if cliArgs.contains("--unshadow") {
+        let n = ShadowedSessions.unshadow(folders: folders)
+        print("\n복구 완료: \(n)개 (원본은 그대로, 새 항목으로 추가)")
+        print("→ Claude 를 재시작하면 목록에 나타납니다.")
+    } else {
+        print("\n복구하려면: --unshadow")
+    }
+    exit(0)
+}
+
 // 메뉴바 전용 앱(LSUIElement). Dock/메뉴바 없이 상단 status item 만 띄운다.
 let app = NSApplication.shared
 let delegate = AppDelegate()

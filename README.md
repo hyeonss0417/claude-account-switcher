@@ -29,7 +29,8 @@ When you switch to another account, its folder is empty — so **all your sessio
 - **Launch at login** toggle, so sync is always running.
 - **Dock icon** (on by default) — click it to pop the menu open at your cursor, for when the menu bar is too crowded to hit the status icon. Turn it off to go menu-bar-only.
 - **Stable code signing** (`setup-signing.sh`) — so macOS's Keychain "Always Allow" actually sticks instead of re-prompting on every switch.
-- **Headless modes** for debugging: `--diagnose`, `--sync`.
+- **Un-shadow recycled-worktree sessions** — Claude Code reuses worktree directories, and the desktop list only shows the newest session per worktree, so older ones silently disappear from the list even though their logs are intact. "가려진 세션 복구" copies those logs back under the main repo and re-lists them as "… (복구)", leaving the originals untouched.
+- **Headless modes** for debugging: `--diagnose`, `--sync`, `--find-shadowed`, `--unshadow`, `--clean-dead`.
 
 ## How it works
 
@@ -81,6 +82,7 @@ Auto-clean empty sessions         ✓
 ──────────────────────────
 Save current login
 Clean up empty sessions
+Recover hidden sessions
 Open backups folder
 Open log
 ──────────────────────────
@@ -149,7 +151,8 @@ Claude 데스크탑은 Claude Code **세션 목록을 계정별 폴더**에 저�
 - **로그인 시 자동 실행** 토글 — 동기화가 항상 돌게.
 - **Dock 아이콘**(기본 켜짐) — 메뉴바가 꽉 차 상태 아이콘을 누르기 어려울 때, Dock 아이콘을 클릭하면 **마우스 위치에 메뉴가 바로 뜬다.** 끄면 메뉴바 전용으로 동작.
 - **고정 코드서명**(`setup-signing.sh`) — Keychain "항상 허용"이 재빌드 후에도 유지되어 전환할 때마다 암호를 묻지 않는다.
-- **헤드리스 디버그 모드**: `--diagnose`, `--sync`.
+- **가려진 세션 복구** — Claude Code 는 worktree 디렉터리를 재활용하는데, 데스크탑 목록은 **worktree 당 최신 세션 하나만** 보여준다. 그래서 로그가 멀쩡한데도 예전 세션이 목록에서 조용히 사라진다(동기화 문제가 아니다). 「가려진 세션 복구」가 그 로그를 본체 저장소 폴더로 복사해 「… (복구)」 항목으로 다시 띄운다. 원본은 그대로 둔다.
+- **헤드리스 디버그 모드**: `--diagnose`, `--sync`, `--find-shadowed`, `--unshadow`, `--clean-dead`.
 
 ### 동작 원리
 
@@ -201,6 +204,7 @@ Dock 아이콘 표시                  ✓
 ──────────────────────────
 현재 로그인 저장
 빈 세션 정리
+가려진 세션 복구
 백업 폴더 열기
 로그 열기
 ──────────────────────────
