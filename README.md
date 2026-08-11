@@ -27,6 +27,7 @@ When you switch to another account, its folder is empty — so **all your sessio
   - First time only: log into the account once, then hit **"현재 로그인 저장" (Save current login)**. From then on it's one click.
 - **Empty-session protection** — a session index whose conversation log is gone (deleted worktree, etc.) is **never propagated** to another account, so switching can't produce sessions that open blank. Use **"빈 세션 정리"** to quarantine ones that already spread.
 - **Launch at login** toggle, so sync is always running.
+- **Dock icon** (on by default) — click it to pop the menu open at your cursor, for when the menu bar is too crowded to hit the status icon. Turn it off to go menu-bar-only.
 - **Stable code signing** (`setup-signing.sh`) — so macOS's Keychain "Always Allow" actually sticks instead of re-prompting on every switch.
 - **Headless modes** for debugging: `--diagnose`, `--sync`.
 
@@ -64,7 +65,7 @@ open ~/Applications/"Claude Account Switcher.app"
 
 ## Usage
 
-Open the menu-bar icon (two people in a circle):
+Open the menu-bar icon (two people in a circle) — or click the Dock icon, which pops the same menu up at your cursor:
 
 ```
 Claude Account Switcher
@@ -75,6 +76,7 @@ Claude Account Switcher
 Sync sessions now                (⌘S)
 Auto-sync (30s)                   ✓
 Launch at login                   ✓
+Show Dock icon                    ✓
 ──────────────────────────
 Save current login
 Clean up empty sessions
@@ -143,6 +145,7 @@ Claude 데스크탑은 Claude Code **세션 목록을 계정별 폴더**에 저�
   - 최초 1회만: 그 계정으로 로그인한 뒤 메뉴의 **「현재 로그인 저장」** 을 누르면 끝.
 - **빈 세션 방지** — 대화 로그가 사라진 인덱스(삭제된 worktree 등)는 **다른 계정으로 복사하지 않는다.** 전환 후 열면 비어있는 세션이 생기지 않는다. 이미 퍼진 것은 **「빈 세션 정리」** 로 격리.
 - **로그인 시 자동 실행** 토글 — 동기화가 항상 돌게.
+- **Dock 아이콘**(기본 켜짐) — 메뉴바가 꽉 차 상태 아이콘을 누르기 어려울 때, Dock 아이콘을 클릭하면 **마우스 위치에 메뉴가 바로 뜬다.** 끄면 메뉴바 전용으로 동작.
 - **고정 코드서명**(`setup-signing.sh`) — Keychain "항상 허용"이 재빌드 후에도 유지되어 전환할 때마다 암호를 묻지 않는다.
 - **헤드리스 디버그 모드**: `--diagnose`, `--sync`.
 
@@ -180,7 +183,7 @@ open ~/Applications/"Claude Account Switcher.app"
 
 ### 사용
 
-메뉴바 아이콘(원 안의 두 사람)을 열면:
+메뉴바 아이콘(원 안의 두 사람)을 열거나, **Dock 아이콘을 클릭**하면(마우스 위치에 같은 메뉴가 뜬다):
 
 ```
 Claude 계정 전환기
@@ -191,6 +194,7 @@ Claude 계정 전환기
 지금 세션 동기화                  (⌘S)
 자동 동기화 (30초)                ✓
 로그인 시 자동 실행               ✓
+Dock 아이콘 표시                  ✓
 ──────────────────────────
 현재 로그인 저장
 빈 세션 정리

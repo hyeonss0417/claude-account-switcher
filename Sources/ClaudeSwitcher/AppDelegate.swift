@@ -10,10 +10,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var syncTimer: Timer?
     private var autoSync = true
 
+    /// 메뉴바가 꽉 차서 상태 아이콘을 누르기 어려울 때를 위한 Dock 아이콘 표시 옵션.
+    private static let dockIconKey = "showDockIcon"
+    private var showDockIcon: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.dockIconKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.dockIconKey) }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
         Paths.ensureAppDir()
         Log.info("앱 시작")
+        applyActivationPolicy()
 
         // 아이콘·메뉴를 먼저 띄운다(즉시 표시). 식별 정보 포착은 Keychain 접근이 없어 프롬프트가 없다.
         // 자격증명 포착(Keychain 허용 창)은 실제 전환/명시적 포착 때만 발생 → 시작이 막히지 않는다.
@@ -52,12 +59,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // MARK: - Dock 아이콘
+    /// Dock 표시 여부에 따라 활성화 정책 전환. `.regular` 면 Dock 에 아이콘이 뜬다.
+    private func applyActivationPolicy() {
+        NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+        if showDockIcon { installMainMenuIfNeeded() }
+    }
+
+    /// Dock 모드(.regular)에서 ⌘Q 등 표준 단축키가 동작하도록 최소 메인 메뉴를 붙인다.
+    private func installMainMenuIfNeeded() {
+        guard NSApp.mainMenu == nil else { return }
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Claude 계정 전환기 열기", action: #selector(openFromDock), keyEquivalent: "")
+            .target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+        NSApp.mainMenu = main
+    }
+
+    @objc private func openFromDock() { popUpMenuAtMouse() }
+
+    /// Dock 아이콘 클릭(창이 없으므로 reopen 이 온다) → 마우스 위치에 메뉴를 띄운다.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        popUpMenuAtMouse()
+        return true
+    }
+
+    /// Dock 에서 열 때 쓰는 팝업. statusItem 에 물린 메뉴와 충돌하지 않도록 **별도 인스턴스**를 만든다.
+    private func popUpMenuAtMouse() {
+        let popup = NSMenu()
+        build(into: popup)
+        NSApp.activate(ignoringOtherApps: true)
+        popup.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
     // MARK: - 메뉴 (열 때마다 재구성 → 데스크탑 계정 전환을 즉시 반영)
     func menuNeedsUpdate(_ menu: NSMenu) { populateMenu() }
 
     private func populateMenu() {
-        manager.refreshFromDisk()
         menu.removeAllItems()
+        build(into: menu)
+    }
+
+    /// 메뉴 내용 구성(상태 아이콘용·Dock 팝업용 공통).
+    private func build(into menu: NSMenu) {
+        manager.refreshFromDisk()
         let active = manager.activeAccountUuid()
 
         let header = NSMenuItem(title: "Claude 계정 전환기", action: nil, keyEquivalent: "")
@@ -86,6 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         auto.state = autoSync ? .on : .off
         let login = addItem(to: menu, "로그인 시 자동 실행", #selector(toggleLaunchAtLogin))
         login.state = launchAtLoginEnabled ? .on : .off
+        let dock = addItem(to: menu, "Dock 아이콘 표시", #selector(toggleDockIcon))
+        dock.state = showDockIcon ? .on : .off
         menu.addItem(.separator())
         addItem(to: menu, "현재 로그인 저장(전환 대상 등록)", #selector(captureNow))
         addItem(to: menu, "빈 세션 정리(죽은 인덱스 격리)", #selector(cleanDead))
@@ -135,6 +187,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func syncNow() { runSyncInBackground(quiet: false) }
+
+    /// Dock 아이콘 표시 토글. 켜면 Dock 아이콘 클릭만으로 메뉴를 열 수 있다
+    /// (메뉴바가 꽉 차 상태 아이콘을 누르기 어려울 때 유용).
+    @objc private func toggleDockIcon() {
+        showDockIcon.toggle()
+        applyActivationPolicy()
+        setStatus("Dock 아이콘: \(showDockIcon ? "표시" : "숨김")")
+    }
     @objc private func toggleAutoSync() { autoSync.toggle(); startAutoSync(); populateMenu() }
 
     // 로그인 항목(SMAppService). 메뉴바 도구가 항상 켜져 있어야 동기화가 상시 동작한다.
