@@ -116,10 +116,9 @@ enum InstanceManager {
         return out
     }
 
-    /// 창을 재시작해 최신 세션 목록을 스캔하게 한다.
-    @discardableResult
-    static func restart(pid: pid_t, accountUuid: String) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+    /// 창이 완전히 종료될 때까지 기다린다(파일을 안전하게 채워 넣기 위한 선행 조건).
+    static func quitAndWait(pid: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
         app.terminate()
         let deadline = Date().addingTimeInterval(8)
         while Date() < deadline, !app.isTerminated {
@@ -127,7 +126,6 @@ enum InstanceManager {
         }
         if !app.isTerminated { app.forceTerminate(); RunLoop.current.run(until: Date().addingTimeInterval(1)) }
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
-        return launch(accountUuid: accountUuid)
     }
 
     // MARK: - 생성 / 실행

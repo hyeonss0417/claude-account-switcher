@@ -300,6 +300,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    /// 세션 폴더를 **완전히 채운 뒤** 창을 띄운다.
+    ///
+    /// Claude 는 시작할 때 폴더를 한 번 스캔한다. 동기화가 비동기로 돌면 창이 먼저 떠서
+    /// 거의 빈 폴더를 스캔해 버리고, 뒤늦게 도착한 파일은 재시작 전까지 안 보인다
+    /// (실측: 창이 뜬 뒤 502개가 기록돼 목록이 텅 빈 것처럼 보였다).
+    /// 그래서 여기서는 동기화가 끝날 때까지 기다렸다가 실행한다.
+    private func syncThenLaunch(accountUuid: String, quitFirst pid: pid_t?, label: String) {
+        setStatus("\(label): 세션 동기화 중…")
+        if let pid { InstanceManager.quitAndWait(pid: pid) }   // 먼저 닫아야 안전하게 채운다
+        let folders = syncFolders()
+        DispatchQueue.global(qos: .userInitiated).async {
+            var copied = 0
+            autoreleasepool {
+                // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
+                copied = SessionSync.syncAll(folders: folders).copied
+            }
+            SessionIndex.flushCaches()
+            DispatchQueue.main.async { [weak self] in
+                InstanceManager.launch(accountUuid: accountUuid)
+                self?.setStatus("\(label) 실행 — 세션 \(copied)개 반영 완료")
+                self?.populateMenu()
+            }
+        }
+    }
+
     // MARK: - 액션
     /// 계정 인스턴스를 연다(이미 떠 있으면 앞으로). 여러 계정을 **동시에** 띄울 수 있다.
     @objc private func openInstance(_ sender: NSMenuItem) {
@@ -323,9 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 a.addButton(withTitle: "그냥 열기")
                 NSApp.activate(ignoringOtherApps: true)
                 if a.runModal() == .alertFirstButtonReturn {
-                    runSyncInBackground(quiet: true, includeRunning: true)
-                    InstanceManager.restart(pid: pid, accountUuid: acct)
-                    setStatus("\(target.displayLabel) 창 재시작 — 새 세션 \(stale)개 반영")
+                    syncThenLaunch(accountUuid: acct, quitFirst: pid, label: target.displayLabel)
                     return
                 }
             }
@@ -353,13 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
 
-        runSyncInBackground(quiet: true, includeRunning: true)  // 열기 전에 채워둔다(시작 시 스캔되도록)
-        if InstanceManager.launch(accountUuid: acct) {
-            setStatus("\(target.displayLabel) 창 실행 — 세션은 자동 통합됩니다")
-        } else {
-            setStatus("실행 실패 — 로그 확인")
-        }
-        populateMenu()
+        syncThenLaunch(accountUuid: acct, quitFirst: nil, label: target.displayLabel)
     }
 
     @objc private func switchAccount(_ sender: NSMenuItem) {
