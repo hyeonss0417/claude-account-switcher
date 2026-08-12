@@ -69,13 +69,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 인스턴스에서 **직접 로그인한 경우** 그 웹세션을 계정 스냅샷으로 저장해 둔다.
     /// (다음 실행부터는 로그인 화면 없이 바로 열린다 — 사용자가 「현재 로그인 저장」을 누르지 않아도 된다)
+    /// 살아있는 로그인을 **항상 최신으로** 스냅샷해 둔다(스냅샷이 이미 있어도 갱신).
+    /// 낡은 스냅샷을 나중에 씌우면 멀쩡한 로그인이 날아가기 때문에, 신선도 유지가 곧 안전장치다.
+    /// 어느 계정으로 로그인돼 있는지는 그 데이터 디렉터리의 config.json 으로 확인한다.
     private func captureInstanceLoginsIfNeeded() {
-        for p in manager.profiles where !WebSession.hasSnapshot(accountUuid: p.accountUuid) {
-            let dir = InstanceManager.dataDir(for: p.accountUuid)
+        var dirs: [URL] = [Paths.appSupportClaude]
+        dirs += manager.profiles.map { InstanceManager.dataDir(for: $0.accountUuid) }
+        for dir in dirs {
             guard FileManager.default.fileExists(atPath: dir.appending(path: "Cookies").path),
-                  WebSession.isLoggedIn(dataDir: dir) else { continue }
-            if WebSession.snapshot(accountUuid: p.accountUuid, from: dir) {
-                Log.info("인스턴스 로그인 자동 저장: \(p.displayLabel)")
+                  WebSession.isLoggedIn(dataDir: dir),
+                  let acct = WebSession.loggedInAccount(dataDir: dir) else { continue }
+            // 스냅샷이 그 계정 것보다 오래됐을 때만 갱신(불필요한 복사 방지)
+            let snapCookies = WebSession.snapshotDir(accountUuid: acct).appending(path: "Cookies")
+            let liveCookies = dir.appending(path: "Cookies")
+            let snapTime = (try? snapCookies.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let liveTime = (try? liveCookies.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            guard liveTime > snapTime else { continue }
+            if WebSession.snapshot(accountUuid: acct, from: dir) {
+                Log.info("로그인 스냅샷 갱신: \(acct.prefix(8))")
             }
         }
     }

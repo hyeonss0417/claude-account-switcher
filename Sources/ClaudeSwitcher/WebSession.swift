@@ -18,6 +18,16 @@ enum WebSession {
         FileManager.default.fileExists(atPath: snapshotDir(accountUuid: accountUuid).appending(path: "Cookies").path)
     }
 
+    /// 그 데이터 디렉터리가 **어느 계정으로** 로그인돼 있는지(각 인스턴스가 자기 config.json 에 기록).
+    /// 스냅샷을 엉뚱한 계정에 씌우는 사고를 막기 위해 반드시 확인한다.
+    static func loggedInAccount(dataDir: URL) -> String? {
+        let cfg = dataDir.appending(path: "config.json")
+        guard let data = try? Data(contentsOf: cfg),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let acct = obj["lastKnownAccountUuid"] as? String, UUID(uuidString: acct) != nil else { return nil }
+        return acct
+    }
+
     /// 쿠키에 로그인 토큰(`sessionKey*`)이 들어있는지 — 그 데이터 디렉터리가 로그인 상태인가.
     static func isLoggedIn(dataDir: URL) -> Bool {
         let cookies = dataDir.appending(path: "Cookies")

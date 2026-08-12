@@ -90,6 +90,17 @@ enum InstanceManager {
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        // ⚠️ 이미 로그인된 인스턴스에는 **절대 덮어쓰지 않는다.**
+        // 예전엔 실행할 때마다 스냅샷을 씌워서, 사용자가 직접 한 로그인을 낡은 스냅샷으로 지워버렸다
+        // (그 스냅샷은 다른 데이터 디렉터리에서 뜬 것이라 서버가 거부 → 로그인 화면으로 되돌아감).
+        if WebSession.isLoggedIn(dataDir: dir) {
+            // 살아있는 로그인을 오히려 스냅샷으로 갱신해 둔다.
+            if let acct = WebSession.loggedInAccount(dataDir: dir), acct == accountUuid {
+                WebSession.snapshot(accountUuid: accountUuid, from: dir)
+            }
+            return true
+        }
+
         // 저장된 웹세션(쿠키/스토리지)을 넣어주면 로그인 화면을 건너뛴다.
         let snap = WebSession.snapshotDir(accountUuid: accountUuid)
         guard fm.fileExists(atPath: snap.path) else {
