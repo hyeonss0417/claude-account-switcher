@@ -222,7 +222,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let isUp = running[dir] != nil || (isActive && running[Paths.appSupportClaude.standardizedFileURL.path] != nil)
 
             var suffix = ""
-            if isUp { suffix = "  · 실행 중" }
+            if isUp {
+                suffix = "  · 실행 중"
+                // 그 창이 시작한 뒤 들어온 세션은 재시작 전까지 목록에 안 뜬다 → 몇 개인지 알려준다.
+                let pid = running[dir] ?? running[Paths.appSupportClaude.standardizedFileURL.path]
+                if let pid {
+                    let instDir = (running[dir] != nil) ? InstanceManager.dataDir(for: profile.accountUuid)
+                                                        : Paths.appSupportClaude
+                    let stale = InstanceManager.staleCount(pid: pid,
+                                                           sessionFolders: InstanceManager.sessionFolders(of: instDir))
+                    if stale > 0 { suffix = "  · 실행 중 · 새 세션 \(stale)개(재시작 필요)" }
+                }
+            }
             else if !ready && !isActive { suffix = "  · 최초 1회 로그인 필요" }
 
             let item = NSMenuItem(title: "\(profile.displayLabel) — \(count) 세션\(suffix)",
@@ -275,12 +286,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let acct = sender.representedObject as? String,
               let target = manager.profiles.first(where: { $0.accountUuid == acct }) else { return }
 
-        // 이미 실행 중이면 그냥 앞으로 가져온다
-        let dir = InstanceManager.dataDir(for: acct).standardizedFileURL.path
-        if InstanceManager.runningDataDirs()[dir] != nil {
+        // 이미 실행 중이면: 뒤처진 세션이 있으면 재시작을 제안하고, 아니면 앞으로 가져온다.
+        let dirPath = InstanceManager.dataDir(for: acct).standardizedFileURL.path
+        if let pid = InstanceManager.runningDataDirs()[dirPath] {
+            let instDir = InstanceManager.dataDir(for: acct)
+            let stale = InstanceManager.staleCount(pid: pid, sessionFolders: InstanceManager.sessionFolders(of: instDir))
+            if stale > 0 {
+                let a = NSAlert()
+                a.messageText = "\(target.displayLabel) 창을 재시작할까요?"
+                a.informativeText = """
+                    이 창이 시작한 뒤에 들어온 세션이 \(stale)개 있습니다.
+                    Claude 는 시작할 때만 세션 목록을 읽기 때문에, 재시작해야 그 세션들이 보입니다.
+                    (진행 중인 작업이 있으면 먼저 저장하세요)
+                    """
+                a.addButton(withTitle: "재시작")
+                a.addButton(withTitle: "그냥 열기")
+                NSApp.activate(ignoringOtherApps: true)
+                if a.runModal() == .alertFirstButtonReturn {
+                    runSyncInBackground(quiet: true)
+                    InstanceManager.restart(pid: pid, accountUuid: acct)
+                    setStatus("\(target.displayLabel) 창 재시작 — 새 세션 \(stale)개 반영")
+                    return
+                }
+            }
             InstanceManager.launch(accountUuid: acct)
             return
         }
+        let dir = dirPath
         // 현재 로그인 중인 계정이면 기본 인스턴스를 그대로 쓴다
         if acct == manager.activeAccountUuid(),
            InstanceManager.runningDataDirs()[Paths.appSupportClaude.standardizedFileURL.path] != nil {

@@ -81,6 +81,55 @@ enum InstanceManager {
         FileManager.default.fileExists(atPath: dataDir(for: accountUuid).path)
     }
 
+    /// 그 창이 **모르는 세션이 몇 개인지**.
+    ///
+    /// Claude 는 시작할 때만 세션 폴더를 스캔하고, 그 뒤로는 자기가 만든 세션만 안다.
+    /// 그래서 동기화로 뒤늦게 들어온 인덱스는 **재시작 전까지 목록에 안 뜬다.**
+    /// 창이 뜬 시각보다 나중에 생긴 인덱스 수 = 그 창이 놓치고 있는 세션 수.
+    static func staleCount(pid: pid_t, sessionFolders: [URL]) -> Int {
+        guard let app = NSRunningApplication(processIdentifier: pid),
+              let launched = app.launchDate else { return 0 }
+        let fm = FileManager.default
+        var count = 0
+        for folder in sessionFolders {
+            guard let items = try? fm.contentsOfDirectory(at: folder,
+                                                          includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+            for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+                guard let m = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                else { continue }
+                if m > launched { count += 1 }
+            }
+        }
+        return count
+    }
+
+    /// 그 인스턴스가 실제로 읽는 세션 폴더들(<dataDir>/claude-code-sessions/*/*).
+    static func sessionFolders(of instanceDir: URL) -> [URL] {
+        let fm = FileManager.default
+        let base = instanceDir.appending(path: "claude-code-sessions", directoryHint: .isDirectory)
+        var out: [URL] = []
+        guard let accts = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return out }
+        for a in accts where UUID(uuidString: a.lastPathComponent) != nil {
+            guard let orgs = try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil) else { continue }
+            for o in orgs where UUID(uuidString: o.lastPathComponent) != nil { out.append(o) }
+        }
+        return out
+    }
+
+    /// 창을 재시작해 최신 세션 목록을 스캔하게 한다.
+    @discardableResult
+    static func restart(pid: pid_t, accountUuid: String) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        app.terminate()
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline, !app.isTerminated {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        if !app.isTerminated { app.forceTerminate(); RunLoop.current.run(until: Date().addingTimeInterval(1)) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+        return launch(accountUuid: accountUuid)
+    }
+
     // MARK: - 생성 / 실행
     /// 인스턴스 데이터 디렉터리를 만들고, 저장된 웹세션으로 시드해 **로그인된 상태로** 시작하게 한다.
     @discardableResult

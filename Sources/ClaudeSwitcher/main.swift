@@ -63,6 +63,13 @@ if cliArgs.contains("--instances") {
         print("  · \(label)  [\(state)]  \(login)")
         print("    dataDir: \(i.dataDir.path)")
     }
+    print("\n=== 창이 놓치고 있는 세션(재시작 필요) ===")
+    for i in list where i.isRunning {
+        let n = InstanceManager.staleCount(pid: i.pid!, sessionFolders: InstanceManager.sessionFolders(of: i.dataDir))
+        let label = m.profiles.first { $0.accountUuid == i.accountUuid }?.displayLabel
+            ?? (i.accountUuid == InstanceManager.defaultKey ? "기본 창" : String(i.accountUuid.prefix(8)))
+        print("  \(label): \(n)개" + (n > 0 ? "  ← 재시작하면 보입니다" : "  (최신)"))
+    }
     let folders = InstanceManager.allSessionFolders(knownAccounts: accounts)
     print("\n동기화 대상 세션 폴더: \(folders.count)개")
     print("진행 중(잠금 대상) 세션: \(SessionLock.busyCount(folders: folders))개")
