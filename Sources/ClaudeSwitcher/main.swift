@@ -47,6 +47,68 @@ if cliArgs.contains("--find-shadowed") || cliArgs.contains("--unshadow") {
     exit(0)
 }
 
+if cliArgs.contains("--instances") {
+    let m = AccountManager()
+    let accounts = m.profiles.map(\.accountUuid)
+    let list = InstanceManager.list(knownAccounts: accounts)
+    print("=== 인스턴스 ===")
+    for i in list {
+        let label = m.profiles.first { $0.accountUuid == i.accountUuid }?.displayLabel
+            ?? (i.accountUuid == InstanceManager.defaultKey ? "기본 창" : String(i.accountUuid.prefix(8)))
+        let state = i.isRunning ? "실행 중(pid \(i.pid!))" : "정지"
+        let login = i.accountUuid == InstanceManager.defaultKey ? "-"
+            : (WebSession.hasSnapshot(accountUuid: i.accountUuid) ? "로그인 저장됨" : "로그인 필요")
+        print("  · \(label)  [\(state)]  \(login)")
+        print("    dataDir: \(i.dataDir.path)")
+    }
+    let folders = InstanceManager.allSessionFolders(knownAccounts: accounts)
+    print("\n동기화 대상 세션 폴더: \(folders.count)개")
+    print("진행 중(잠금 대상) 세션: \(SessionLock.busyCount(folders: folders))개")
+    exit(0)
+}
+
+if cliArgs.contains("--enforce-lock") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid))
+    let s = SessionLock.enforce(folders: folders)
+    print("잠금 적용: 감춤 \(s.busyHeld)개 / 해제 \(s.released)개")
+    exit(0)
+}
+
+/// 장시간 동작 시 메모리가 늘어나는지 검증한다(`--stress [횟수]`).
+/// 이 앱은 과거에 20시간 동안 수십 GB 를 누수해 머신을 마비시킨 적이 있어, 회귀 확인용으로 남겨둔다.
+if cliArgs.contains("--stress") {
+    let n = cliArgs.last.flatMap(Int.init) ?? 20
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid))
+    func rssMB() -> Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? Double(info.resident_size) / 1_048_576 : -1
+    }
+    let start = rssMB()
+    print("반복 \(n)회 — 시작 RSS \(String(format: "%.1f", start)) MB")
+    for i in 1...n {
+        autoreleasepool {
+            _ = SessionSync.syncAll(folders: folders)
+            if Set(folders.map(SessionLock.instanceRoot)).count > 1 {
+                _ = SessionLock.enforce(folders: folders)
+            }
+        }
+        if i % 5 == 0 { print("  \(i)회차 RSS \(String(format: "%.1f", rssMB())) MB") }
+    }
+    let end = rssMB()
+    let growth = end - start
+    print("종료 RSS \(String(format: "%.1f", end)) MB — 증가 \(String(format: "%+.1f", growth)) MB")
+    print(growth < 20 ? "✓ 누수 없음(증가 20MB 미만)" : "✗ 누수 의심 — 회당 \(String(format: "%.2f", growth/Double(n))) MB")
+    exit(0)
+}
+
 // 메뉴바 전용 앱(LSUIElement). Dock/메뉴바 없이 상단 status item 만 띄운다.
 let app = NSApplication.shared
 let delegate = AppDelegate()

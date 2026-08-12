@@ -42,7 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startAutoSync() {
         syncTimer?.invalidate()
         guard autoSync else { watcher?.stop(); return }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        // 감시자와 생명주기 훅이 있으므로 타이머는 보조 수단이면 충분하다.
+        // (30초 폴링은 매번 수천 개 파일을 훑어 메모리·I/O 를 크게 잡아먹었다)
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.runSyncInBackground(quiet: true)
         }
         startWatching()
@@ -50,14 +52,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         runSyncInBackground(quiet: true)
     }
 
-    /// 세션 폴더에 변화가 생기면 즉시 동기화(폴링 30초 창을 메운다).
+    /// 세션 폴더 변화를 감지해 동기화. **우리가 쓴 변화는 무시**해야 한다 —
+    /// 그러지 않으면 동기화 → 감시 이벤트 → 동기화 … 로 끝없이 돈다(메모리 폭주의 주원인이었다).
     private func startWatching() {
-        let folders = manager.discoverFolders().map(\.url)
-        let roots = Set(folders.map { $0.deletingLastPathComponent() }) // 계정 루트
+        let roots = Set(manager.discoverFolders().map { $0.url.deletingLastPathComponent() })
         watcher = FolderWatcher { [weak self] in
+            guard SyncEngine.shared.shouldAcceptWatchEvent() else { return }
             DispatchQueue.main.async { self?.runSyncInBackground(quiet: true) }
         }
-        watcher?.watch(Array(roots) + folders)
+        watcher?.watch(Array(roots))
     }
 
     /// Claude 는 **시작할 때만** 세션 폴더를 스캔한다.
@@ -84,20 +87,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { UserDefaults.standard.set(newValue, forKey: Self.autoCleanKey) }
     }
 
+    private var busyCountCache = 0
+    private var busyCountAt = Date.distantPast
+
+    /// 진행 중 세션 수(30초 캐시). 인스턴스가 하나면 잠금이 없으므로 항상 0.
+    private func cachedBusyCount() -> Int {
+        if Date().timeIntervalSince(busyCountAt) < 30 { return busyCountCache }
+        let folders = syncFolders()
+        let value = Set(folders.map(SessionLock.instanceRoot)).count > 1
+            ? SessionLock.busyCount(folders: folders) : 0
+        busyCountCache = value
+        busyCountAt = Date()
+        return value
+    }
+
+    /// 동기화 대상 = 기본 인스턴스 + 계정별 인스턴스의 모든 세션 폴더.
+    private func syncFolders() -> [URL] {
+        let accounts = manager.profiles.map(\.accountUuid)
+        let all = InstanceManager.allSessionFolders(knownAccounts: accounts)
+        return all.isEmpty ? manager.discoverFolders().map(\.url) : all
+    }
+
+    /// 모든 동기화는 SyncEngine 을 거친다(직렬 실행·최소 간격·자기 쓰기 무시).
     private func runSyncInBackground(quiet: Bool) {
-        let folders = manager.discoverFolders().map(\.url)
-        let clean = autoCleanDead
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            // 로그가 사라진 인덱스를 먼저 격리 → 계정 간 세션 수가 어긋나지 않는다.
-            if clean {
-                let q = SessionSync.quarantineDeadIndexes(folders: folders)
-                if q > 0 { Log.info("자동 정리: 빈 세션 \(q)개 격리") }
+        SyncEngine.shared.request(folders: { [weak self] in self?.syncFolders() ?? [] },
+                                  autoClean: autoCleanDead,
+                                  force: !quiet) { [weak self] r in
+            guard !r.skipped else { return }
+            if r.copied > 0 || r.quarantined > 0 {
+                Log.info("동기화: 복사 \(r.copied), 격리 \(r.quarantined), 잠금 \(r.lockHeld)")
             }
-            let r = SessionSync.syncAll(folders: folders)
-            if r.copied > 0 { Log.info("자동 동기화: \(r.copied)개 복사") }
             DispatchQueue.main.async {
                 if !quiet {
-                    self?.setStatus("동기화 완료 — \(r.copied)개 통합, 빈 세션 \(r.skippedDead)개 제외")
+                    var msg = "동기화 완료 — \(r.copied)개 통합"
+                    if r.quarantined > 0 { msg += ", 빈 세션 \(r.quarantined)개 정리" }
+                    if r.lockHeld > 0 || r.lockReleased > 0 { msg += " · 잠금 \(r.lockHeld)/해제 \(r.lockReleased)" }
+                    self?.setStatus(msg)
                 }
             }
         }
@@ -159,19 +184,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(header)
         menu.addItem(.separator())
 
+        let running = InstanceManager.runningDataDirs()
         let sorted = manager.profiles.sorted { ($0.email ?? $0.accountUuid) < ($1.email ?? $1.accountUuid) }
         for profile in sorted {
             let count = manager.sessionCount(accountUuid: profile.accountUuid, orgUuid: profile.organizationUuid)
             let isActive = profile.accountUuid == active
-            // 웹세션 스냅샷이 있어야 데스크탑 로그인까지 원클릭 전환된다.
             let ready = WebSession.hasSnapshot(accountUuid: profile.accountUuid)
-            let credMark = (isActive || ready) ? "" : "  · 최초 1회 로그인 필요"
-            let item = NSMenuItem(title: "\(profile.displayLabel) — \(count) 세션\(credMark)",
-                                  action: #selector(switchAccount(_:)), keyEquivalent: "")
+            let dir = InstanceManager.dataDir(for: profile.accountUuid).standardizedFileURL.path
+            let isUp = running[dir] != nil || (isActive && running[Paths.appSupportClaude.standardizedFileURL.path] != nil)
+
+            var suffix = ""
+            if isUp { suffix = "  · 실행 중" }
+            else if !ready && !isActive { suffix = "  · 최초 1회 로그인 필요" }
+
+            let item = NSMenuItem(title: "\(profile.displayLabel) — \(count) 세션\(suffix)",
+                                  action: #selector(openInstance(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = profile.accountUuid
-            item.state = isActive ? .on : .off
+            item.state = isUp ? .on : .off
             menu.addItem(item)
+        }
+        // 메뉴를 열 때마다 전 인덱스를 다시 읽으면 비싸다 → 짧게 캐시하고,
+        // 인스턴스가 2개 이상일 때(=잠금이 의미 있을 때)만 계산한다.
+        let busy = cachedBusyCount()
+        if busy > 0 {
+            let info = NSMenuItem(title: "  진행 중 \(busy)개 — 다른 창에서는 숨김", action: nil, keyEquivalent: "")
+            info.isEnabled = false
+            menu.addItem(info)
         }
 
         menu.addItem(.separator())
@@ -203,6 +242,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - 액션
+    /// 계정 인스턴스를 연다(이미 떠 있으면 앞으로). 여러 계정을 **동시에** 띄울 수 있다.
+    @objc private func openInstance(_ sender: NSMenuItem) {
+        guard let acct = sender.representedObject as? String,
+              let target = manager.profiles.first(where: { $0.accountUuid == acct }) else { return }
+
+        // 이미 실행 중이면 그냥 앞으로 가져온다
+        let dir = InstanceManager.dataDir(for: acct).standardizedFileURL.path
+        if InstanceManager.runningDataDirs()[dir] != nil {
+            InstanceManager.launch(accountUuid: acct)
+            return
+        }
+        // 현재 로그인 중인 계정이면 기본 인스턴스를 그대로 쓴다
+        if acct == manager.activeAccountUuid(),
+           InstanceManager.runningDataDirs()[Paths.appSupportClaude.standardizedFileURL.path] != nil {
+            setStatus("\(target.displayLabel) 는 기본 창에서 실행 중입니다.")
+            return
+        }
+
+        if !WebSession.hasSnapshot(accountUuid: acct) {
+            let a = NSAlert()
+            a.messageText = "\(target.displayLabel) 창을 새로 열까요?"
+            a.informativeText = """
+                이 계정은 저장된 로그인이 없어 새 창이 로그인 화면으로 시작합니다.
+                로그인한 뒤 메뉴의 「현재 로그인 저장」을 누르면, 다음부터는 바로 로그인된 상태로 열립니다.
+                """
+            a.addButton(withTitle: "열기")
+            a.addButton(withTitle: "취소")
+            NSApp.activate(ignoringOtherApps: true)
+            guard a.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        runSyncInBackground(quiet: true)      // 열기 전에 세션을 맞춰둔다(시작 시 스캔되도록)
+        if InstanceManager.launch(accountUuid: acct) {
+            setStatus("\(target.displayLabel) 창 실행 — 세션은 자동 통합됩니다")
+        } else {
+            setStatus("실행 실패 — 로그 확인")
+        }
+        populateMenu()
+    }
+
     @objc private func switchAccount(_ sender: NSMenuItem) {
         guard let acct = sender.representedObject as? String,
               let target = manager.profiles.first(where: { $0.accountUuid == acct }) else { return }

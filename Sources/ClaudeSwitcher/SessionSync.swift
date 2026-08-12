@@ -28,35 +28,38 @@ enum SessionSync {
         var best: [String: Best] = [:]
         var perFolder: [URL: Set<String>] = [:]
 
+        // 파일을 대량으로 읽는 구간 — 오토릴리즈 객체가 쌓이지 않도록 폴더 단위로 풀을 감싼다.
         for folder in folders {
-            var names = Set<String>()
-            if let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]) {
-                for item in items {
-                    let name = item.lastPathComponent
-                    guard name.hasPrefix("local_"), name.hasSuffix(".json") else { continue }
-                    names.insert(name)
-                    guard let idx = SessionIndex.load(item) else { report.failed += 1; continue }
-                    if let e = best[name] { if idx.modified > e.index.modified { best[name] = Best(index: idx) } }
-                    else { best[name] = Best(index: idx) }
+            autoreleasepool {
+                var names = Set<String>()
+                if let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                    for item in items {
+                        let name = item.lastPathComponent
+                        guard name.hasPrefix("local_"), name.hasSuffix(".json") else { continue }
+                        names.insert(name)
+                        guard let idx = SessionIndex.load(item) else { report.failed += 1; continue }
+                        if let e = best[name] { if idx.modified > e.index.modified { best[name] = Best(index: idx) } }
+                        else { best[name] = Best(index: idx) }
+                    }
                 }
+                perFolder[folder] = names
             }
-            perFolder[folder] = names
         }
 
         let now = Date()
-        for (name, b) in best {
+        for (name, b) in best { autoreleasepool {
             // 쓰는 중인 파일 회피
-            if now.timeIntervalSince(b.index.modified) < 3 { report.skippedBusy += 1; continue }
+            if now.timeIntervalSince(b.index.modified) < 3 { report.skippedBusy += 1; return }
 
             // 살아있는 로그가 있는 인덱스만 전파 (빈 세션 확산 방지)
             let alive = b.index.hasLiveLog || b.index.locateLogAnywhere(index: logIndex) != nil
-            guard alive else { report.skippedDead += 1; continue }
+            guard alive else { report.skippedDead += 1; return }
 
             for folder in folders where !(perFolder[folder]?.contains(name) ?? false) {
                 if atomicCopy(from: b.index.url, to: folder.appending(path: name)) { report.copied += 1 }
                 else { report.failed += 1 }
             }
-        }
+        } }
         if report.skippedDead > 0 {
             Log.info("동기화: 죽은 인덱스 \(report.skippedDead)개 건너뜀(대화 로그 없음 → 빈 세션 방지)")
         }
