@@ -102,8 +102,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
                 guard app?.bundleIdentifier == AuthSwitcher.claudeBundleId else { return }
-                Log.info("Claude \(name == NSWorkspace.didLaunchApplicationNotification ? "실행" : "종료") 감지 → 동기화")
-                self?.runSyncInBackground(quiet: true)
+                let launched = name == NSWorkspace.didLaunchApplicationNotification
+                Log.info("Claude \(launched ? "실행" : "종료") 감지 → 동기화")
+                // 종료 시점에는 그 창의 폴더에도 채워 넣어야 다음 실행에서 전부 보인다.
+                self?.runSyncInBackground(quiet: true, includeRunning: !launched)
             }
         }
     }
@@ -137,10 +139,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 모든 동기화는 SyncEngine 을 거친다(직렬 실행·최소 간격·자기 쓰기 무시).
-    private func runSyncInBackground(quiet: Bool) {
+    /// 지금 실행 중인 창들이 읽는 세션 폴더 — 여기엔 쓰지 않는다.
+    /// Claude 는 시작할 때만 폴더를 읽으므로 넣어도 재시작 전엔 안 보이고,
+    /// 사이드바가 저장소 정보를 다시 해석하면서 같은 프로젝트가 잠깐 두 그룹으로 갈라진다.
+    private func foldersOfRunningWindows() -> Set<String> {
+        var out = Set<String>()
+        for (dirPath, _) in InstanceManager.runningDataDirs() {
+            for f in InstanceManager.sessionFolders(of: URL(fileURLWithPath: dirPath)) {
+                out.insert(f.standardizedFileURL.path)
+            }
+        }
+        return out
+    }
+
+    /// - Parameter includeRunning: 그 창을 곧 재시작할 때만 true(그때는 채워 넣어야 한다).
+    private func runSyncInBackground(quiet: Bool, includeRunning: Bool = false) {
         SyncEngine.shared.request(folders: { [weak self] in self?.syncFolders() ?? [] },
                                   autoClean: autoCleanDead,
-                                  force: !quiet) { [weak self] r in
+                                  force: !quiet,
+                                  skipWriteTo: { [weak self] in
+                                      includeRunning ? [] : (self?.foldersOfRunningWindows() ?? [])
+                                  }) { [weak self] r in
             guard !r.skipped else { return }
             if r.copied > 0 || r.quarantined > 0 {
                 Log.info("동기화: 복사 \(r.copied), 격리 \(r.quarantined), 잠금 \(r.lockHeld)")
@@ -150,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     var msg = "동기화 완료 — \(r.copied)개 통합"
                     if r.quarantined > 0 { msg += ", 빈 세션 \(r.quarantined)개 정리" }
                     if r.lockHeld > 0 || r.lockReleased > 0 { msg += " · 잠금 \(r.lockHeld)/해제 \(r.lockReleased)" }
+                    if r.deferredRunning > 0 { msg += " · 실행 중 창 \(r.deferredRunning)건은 재시작 시" }
                     self?.setStatus(msg)
                 }
             }
@@ -303,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 a.addButton(withTitle: "그냥 열기")
                 NSApp.activate(ignoringOtherApps: true)
                 if a.runModal() == .alertFirstButtonReturn {
-                    runSyncInBackground(quiet: true)
+                    runSyncInBackground(quiet: true, includeRunning: true)
                     InstanceManager.restart(pid: pid, accountUuid: acct)
                     setStatus("\(target.displayLabel) 창 재시작 — 새 세션 \(stale)개 반영")
                     return
@@ -333,7 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
 
-        runSyncInBackground(quiet: true)      // 열기 전에 세션을 맞춰둔다(시작 시 스캔되도록)
+        runSyncInBackground(quiet: true, includeRunning: true)  // 열기 전에 채워둔다(시작 시 스캔되도록)
         if InstanceManager.launch(accountUuid: acct) {
             setStatus("\(target.displayLabel) 창 실행 — 세션은 자동 통합됩니다")
         } else {

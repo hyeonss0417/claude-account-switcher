@@ -4,6 +4,7 @@ struct SyncReport {
     var copied = 0
     var skippedDead = 0      // 대화 로그가 없는 "죽은 인덱스" — 복사하면 빈 세션으로 보인다
     var skippedBusy = 0      // 쓰는 중인 파일
+    var deferredRunning = 0  // 실행 중인 창이라 나중(종료/재실행 시)으로 미룬 복사
     var failed = 0
 }
 
@@ -15,8 +16,14 @@ struct SyncReport {
 /// ⚠️ **핵심 규칙**: 대화 로그(jsonl)가 살아있는 인덱스만 복사한다.
 /// worktree 삭제 등으로 로그가 사라진 인덱스를 퍼뜨리면 목록엔 뜨지만 열면 **빈 세션**이 된다.
 enum SessionSync {
+    /// - Parameter skipWriteTo: **읽기만 하고 쓰지는 않을** 폴더들(=실행 중인 창의 폴더).
+    ///
+    ///   Claude 는 시작할 때만 세션 폴더를 읽는다. 그래서 실행 중인 창의 폴더에 인덱스를 넣어도
+    ///   재시작 전에는 목록에 뜨지 않는다 — **이득은 없고**, 사이드바가 저장소 정보를 다시 해석하는
+    ///   동안 같은 프로젝트가 잠깐 두 그룹으로 쪼개졌다 합쳐지는 깜빡임만 생긴다.
+    ///   그래서 실행 중인 창에는 쓰지 않고, 그 창이 **종료될 때와 실행되기 직전에** 채운다.
     @discardableResult
-    static func syncAll(folders: [URL]) -> SyncReport {
+    static func syncAll(folders: [URL], skipWriteTo: Set<String> = []) -> SyncReport {
         var report = SyncReport()
         guard folders.count > 1 else { return report }
         let fm = FileManager.default
@@ -56,6 +63,8 @@ enum SessionSync {
             guard alive else { report.skippedDead += 1; return }
 
             for folder in folders where !(perFolder[folder]?.contains(name) ?? false) {
+                // 실행 중인 창의 폴더는 건너뛴다(위 설명 참고 — 지금 넣어도 안 보이고 깜빡임만 생긴다).
+                if skipWriteTo.contains(folder.standardizedFileURL.path) { report.deferredRunning += 1; continue }
                 if atomicCopy(from: b.index.url, to: folder.appending(path: name)) { report.copied += 1 }
                 else { report.failed += 1 }
             }

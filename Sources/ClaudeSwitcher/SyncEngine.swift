@@ -21,6 +21,7 @@ final class SyncEngine {
         var quarantined = 0
         var lockHeld = 0
         var lockReleased = 0
+        var deferredRunning = 0      // 실행 중인 창이라 미룬 복사(종료/재실행 때 반영)
         var skipped = false          // 최소 간격/중복 실행으로 건너뜀
     }
 
@@ -46,9 +47,12 @@ final class SyncEngine {
     }
 
     /// 동기화 요청. `force` 면 최소 간격을 무시한다(사용자가 직접 누른 경우).
+    /// - Parameter skipWriteTo: 읽기만 하고 **쓰지 않을** 폴더(실행 중인 창). Claude 는 시작 시에만
+    ///   폴더를 읽으므로, 실행 중인 창에 넣어도 안 보이고 사이드바 그룹만 잠시 쪼개진다.
     func request(folders: @escaping () -> [URL],
                  autoClean: Bool,
                  force: Bool = false,
+                 skipWriteTo: @escaping () -> Set<String> = { [] },
                  completion: ((Result) -> Void)? = nil) {
         lock.lock()
         if running {
@@ -79,9 +83,10 @@ final class SyncEngine {
                     self.lastQuarantine = Date()
                 }
 
-                let r = SessionSync.syncAll(folders: f)
+                let r = SessionSync.syncAll(folders: f, skipWriteTo: skipWriteTo())
                 result.copied = r.copied
                 result.skippedDead = r.skippedDead
+                result.deferredRunning = r.deferredRunning
 
                 // 인스턴스가 2개 이상일 때만 잠금이 의미가 있다(같은 인스턴스 폴더끼리는 감추면 안 됨).
                 if Set(f.map(SessionLock.instanceRoot)).count > 1 {
