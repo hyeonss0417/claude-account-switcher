@@ -50,19 +50,22 @@ enum SessionLock {
         var bySession: [String: [Entry]] = [:]
         var logMTime: [String: Date] = [:]
 
+        // 인덱스 파일은 크고(평균 250KB) 수천 개다 — 전체 파싱하지 않고 헤드 스캔만 쓴다.
         for folder in folders {
-            guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
-            for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
-                guard let data = try? Data(contentsOf: item),
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let cli = obj["cliSessionId"] as? String else { continue }
-                let ts = (obj["lastActivityAt"] as? Double) ?? 0
-                bySession[cli, default: []].append(Entry(folder: folder, url: item, lastActivity: ts))
+            autoreleasepool {
+                guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
+                for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+                    autoreleasepool {
+                        guard let idx = SessionIndex.load(item), let cli = idx.sessionId else { return }
+                        bySession[cli, default: []].append(
+                            Entry(folder: folder, url: item, lastActivity: idx.lastActivity))
 
-                if logMTime[cli] == nil, let idx = SessionIndex.load(item), let log = idx.logURL,
-                   let vals = try? log.resourceValues(forKeys: [.contentModificationDateKey]),
-                   let m = vals.contentModificationDate {
-                    logMTime[cli] = m
+                        if logMTime[cli] == nil, let log = idx.logURL,
+                           let vals = try? log.resourceValues(forKeys: [.contentModificationDateKey]),
+                           let m = vals.contentModificationDate {
+                            logMTime[cli] = m
+                        }
+                    }
                 }
             }
         }

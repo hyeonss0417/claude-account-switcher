@@ -49,18 +49,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         startWatching()
         observeClaudeLifecycle()
+        captureInstanceLoginsIfNeeded()
         runSyncInBackground(quiet: true)
     }
 
     /// 세션 폴더 변화를 감지해 동기화. **우리가 쓴 변화는 무시**해야 한다 —
     /// 그러지 않으면 동기화 → 감시 이벤트 → 동기화 … 로 끝없이 돈다(메모리 폭주의 주원인이었다).
     private func startWatching() {
-        let roots = Set(manager.discoverFolders().map { $0.url.deletingLastPathComponent() })
+        // 기본 인스턴스 + 계정별 인스턴스의 계정 루트를 모두 감시해야
+        // 새 인스턴스에서 만든 세션도 곧바로 통합된다.
+        var roots = Set(manager.discoverFolders().map { $0.url.deletingLastPathComponent() })
+        for folder in syncFolders() { roots.insert(folder.deletingLastPathComponent()) }
         watcher = FolderWatcher { [weak self] in
             guard SyncEngine.shared.shouldAcceptWatchEvent() else { return }
             DispatchQueue.main.async { self?.runSyncInBackground(quiet: true) }
         }
         watcher?.watch(Array(roots))
+    }
+
+    /// 인스턴스에서 **직접 로그인한 경우** 그 웹세션을 계정 스냅샷으로 저장해 둔다.
+    /// (다음 실행부터는 로그인 화면 없이 바로 열린다 — 사용자가 「현재 로그인 저장」을 누르지 않아도 된다)
+    private func captureInstanceLoginsIfNeeded() {
+        for p in manager.profiles where !WebSession.hasSnapshot(accountUuid: p.accountUuid) {
+            let dir = InstanceManager.dataDir(for: p.accountUuid)
+            guard FileManager.default.fileExists(atPath: dir.appending(path: "Cookies").path),
+                  WebSession.isLoggedIn(dataDir: dir) else { continue }
+            if WebSession.snapshot(accountUuid: p.accountUuid, from: dir) {
+                Log.info("인스턴스 로그인 자동 저장: \(p.displayLabel)")
+            }
+        }
     }
 
     /// Claude 는 **시작할 때만** 세션 폴더를 스캔한다.
@@ -104,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 동기화 대상 = 기본 인스턴스 + 계정별 인스턴스의 모든 세션 폴더.
     private func syncFolders() -> [URL] {
         let accounts = manager.profiles.map(\.accountUuid)
-        let all = InstanceManager.allSessionFolders(knownAccounts: accounts)
+        let all = InstanceManager.allSessionFolders(knownAccounts: accounts, profiles: manager.profiles)
         return all.isEmpty ? manager.discoverFolders().map(\.url) : all
     }
 

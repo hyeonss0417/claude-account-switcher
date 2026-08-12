@@ -8,7 +8,9 @@ if cliArgs.contains("--diagnose") {
 }
 if cliArgs.contains("--sync") {
     let m = AccountManager()
-    let folders = m.discoverFolders().map(\.url)
+    // 앱과 동일한 대상(기본 인스턴스 + 계정별 인스턴스)을 쓴다.
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                    profiles: m.profiles)
     let r = SessionSync.syncAll(folders: folders)
     print("동기화 완료: 폴더 \(folders.count)개")
     print("  복사: \(r.copied)")

@@ -11,6 +11,8 @@ struct SessionIndex {
     let cwd: String?
     let title: String?
     let modified: Date
+    /// 세션의 마지막 활동 시각(ms). 잠금에서 "소유 인스턴스" 판별에 쓴다.
+    var lastActivity: Double = 0
 
     /// `~/.claude/projects` 폴더명 인코딩 규칙: 영숫자와 `-` 를 제외한 모든 문자를 `-` 로 치환.
     /// (`/`, `.`, `_`, 공백, 한글 등 전부 해당 — 실측으로 확인된 규칙)
@@ -26,6 +28,10 @@ struct SessionIndex {
     private static var parseCache: [String: CacheEntry] = [:]
     private static let parseLock = NSLock()
 
+    /// 헤드에서 읽어들일 크기. 필요한 키(sessionId·cliSessionId·cwd·originCwd·title …)는 모두
+    /// 파일 앞쪽에 몰려 있어 이 정도면 충분하다. 못 찾으면 전체 파싱으로 폴백한다.
+    private static let headBytes = 16 * 1024
+
     static func load(_ url: URL) -> SessionIndex? {
         let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
         let mtime = vals?.contentModificationDate ?? .distantPast
@@ -39,18 +45,40 @@ struct SessionIndex {
         }
         parseLock.unlock()
 
-        // 파일 단위로 풀을 감싸 파싱 중간 산물이 즉시 회수되게 한다.
+        // 인덱스 파일은 평균 250KB 나 되고 수천 개다. 전체를 JSONSerialization 으로 파싱하면
+        // 객체 그래프가 파일당 수 MB 로 부풀어, 한 사이클에 힙이 1GB 까지 치솟는다(실측).
+        // 필요한 값은 문자열 몇 개뿐이므로 **앞부분만 읽어 키를 직접 스캔**한다.
         var result: SessionIndex?
         autoreleasepool {
-            guard let data = try? Data(contentsOf: url),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-            result = SessionIndex(
-                url: url,
-                sessionId: (obj["cliSessionId"] as? String) ?? (obj["sessionId"] as? String),
-                cwd: (obj["cwd"] as? String) ?? (obj["originCwd"] as? String),
-                title: obj["title"] as? String,
-                modified: mtime
-            )
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+            defer { try? handle.close() }
+            guard let head = try? handle.read(upToCount: headBytes), !head.isEmpty else { return }
+            let text = String(decoding: head, as: UTF8.self)
+
+            let cli = Self.scanString(text, key: "cliSessionId")
+            let sid = Self.scanString(text, key: "sessionId")
+            let cwd = Self.scanString(text, key: "cwd")
+            let origin = Self.scanString(text, key: "originCwd")
+            let title = Self.scanString(text, key: "title")
+
+            guard (cli ?? sid) != nil, (cwd ?? origin) != nil else { return }   // 못 찾으면 폴백
+            result = SessionIndex(url: url, sessionId: cli ?? sid,
+                                  cwd: cwd ?? origin, title: title, modified: mtime,
+                                  lastActivity: Self.scanNumber(text, key: "lastActivityAt") ?? 0)
+        }
+        if result == nil {
+            // 폴백: 드물게 헤드에 없으면 전체 파싱
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: url),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                result = SessionIndex(
+                    url: url,
+                    sessionId: (obj["cliSessionId"] as? String) ?? (obj["sessionId"] as? String),
+                    cwd: (obj["cwd"] as? String) ?? (obj["originCwd"] as? String),
+                    title: obj["title"] as? String,
+                    modified: mtime,
+                    lastActivity: (obj["lastActivityAt"] as? Double) ?? 0)
+            }
         }
         if let r = result {
             parseLock.lock()
@@ -59,6 +87,24 @@ struct SessionIndex {
             parseLock.unlock()
         }
         return result
+    }
+
+    /// `"key":"value"` 형태의 문자열 값을 찾아낸다(이스케이프가 없는 단순 값 기준).
+    /// JSON 전체를 객체로 만들지 않기 위한 가벼운 스캐너다.
+    static func scanString(_ text: String, key: String) -> String? {
+        guard let r = text.range(of: "\"\(key)\":\"") else { return nil }
+        let rest = text[r.upperBound...]
+        guard let end = rest.firstIndex(of: "\"") else { return nil }
+        let value = String(rest[..<end])
+        return value.isEmpty ? nil : value
+    }
+
+    /// `"key":123` 형태의 숫자 값.
+    static func scanNumber(_ text: String, key: String) -> Double? {
+        guard let r = text.range(of: "\"\(key)\":") else { return nil }
+        let rest = text[r.upperBound...].prefix(32)
+        let digits = rest.prefix { $0.isNumber || $0 == "." || $0 == "-" }
+        return Double(digits)
     }
 
     /// 이 인덱스가 가리키는 대화 로그 경로(기대 위치).

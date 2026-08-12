@@ -130,11 +130,23 @@ enum InstanceManager {
     }
 
     /// 모든 인스턴스(기본 포함)의 세션 폴더(<acct>/<org>)를 모아준다 — 동기화 대상.
-    static func allSessionFolders(knownAccounts: [String]) -> [URL] {
+    ///
+    /// `profiles` 를 주면 **아직 없는 인스턴스 세션 폴더를 미리 만들어** 동기화 대상에 포함시킨다.
+    /// (새 인스턴스는 로그인 후에야 폴더가 생겨서, 그 전 동기화에서 누락돼 목록이 빈 채로 시작한다)
+    static func allSessionFolders(knownAccounts: [String], profiles: [Profile] = []) -> [URL] {
         let fm = FileManager.default
         var roots: [URL] = [Paths.sessionsBase]
         for acct in knownAccounts {
             let base = dataDir(for: acct).appending(path: "claude-code-sessions", directoryHint: .isDirectory)
+            // 인스턴스 디렉터리가 있으면, 그 계정의 <acct>/<org> 경로를 미리 만들어 둔다.
+            if fm.fileExists(atPath: dataDir(for: acct).path),
+               let p = profiles.first(where: { $0.accountUuid == acct }) {
+                let target = base.appending(path: p.accountUuid).appending(path: p.organizationUuid)
+                if !fm.fileExists(atPath: target.path) {
+                    try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+                    Log.info("인스턴스 세션 폴더 생성: \(acct.prefix(8))")
+                }
+            }
             if fm.fileExists(atPath: base.path) { roots.append(base) }
         }
         var folders: [URL] = []

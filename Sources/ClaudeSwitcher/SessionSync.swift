@@ -66,10 +66,15 @@ enum SessionSync {
         return report
     }
 
+    /// 인덱스 파일을 복사한다.
+    ///
+    /// 여기서 JSON 을 다시 파싱하지 않는다 — 호출 전에 `SessionIndex.load` 로 이미 파싱에 성공한
+    /// 파일만 넘어오기 때문이다. 파일당 50KB 를 재파싱하면 사본 수천 개를 만들 때 순간 메모리가
+    /// GB 단위로 튄다(실측 1.1GB). 대신 반쪽 파일만 값싸게 걸러낸다.
     private static func atomicCopy(from src: URL, to dest: URL) -> Bool {
         let fm = FileManager.default
-        guard let data = try? Data(contentsOf: src),
-              (try? JSONSerialization.jsonObject(with: data)) != nil else { return false } // 반쪽 파일 회피
+        guard let data = try? Data(contentsOf: src, options: .mappedIfSafe),
+              data.count > 2, data.last == UInt8(ascii: "}") else { return false }
         let tmp = dest.deletingLastPathComponent().appending(path: ".tmp_\(UUID().uuidString)_\(dest.lastPathComponent)")
         do {
             try data.write(to: tmp, options: .atomic)

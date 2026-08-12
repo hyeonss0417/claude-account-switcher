@@ -18,16 +18,28 @@ enum WebSession {
         FileManager.default.fileExists(atPath: snapshotDir(accountUuid: accountUuid).appending(path: "Cookies").path)
     }
 
-    /// 현재 웹세션을 해당 계정 스냅샷으로 저장.
+    /// 쿠키에 로그인 토큰(`sessionKey*`)이 들어있는지 — 그 데이터 디렉터리가 로그인 상태인가.
+    static func isLoggedIn(dataDir: URL) -> Bool {
+        let cookies = dataDir.appending(path: "Cookies")
+        guard let data = try? Data(contentsOf: cookies) else { return false }
+        // SQLite 를 열지 않고도 쿠키 이름은 평문으로 들어있어 존재 확인이 가능하다(값은 암호화됨).
+        return data.range(of: Data("sessionKey".utf8)) != nil
+    }
+
+    /// 현재 웹세션을 해당 계정 스냅샷으로 저장. `from` 을 주면 그 데이터 디렉터리에서 가져온다
+    /// (인스턴스에서 직접 로그인한 경우).
     @discardableResult
-    static func snapshot(accountUuid: String) -> Bool {
+    static func snapshot(accountUuid: String, from source: URL? = nil) -> Bool {
         let fm = FileManager.default
         let dest = snapshotDir(accountUuid: accountUuid)
+        let sourceItems: [URL] = source.map { root in
+            ["Cookies", "Cookies-journal", "Local Storage", "Session Storage"].map { root.appending(path: $0) }
+        } ?? items
         do {
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
             try fm.createDirectory(at: dest, withIntermediateDirectories: true)
             var saved = 0
-            for item in items where fm.fileExists(atPath: item.path) {
+            for item in sourceItems where fm.fileExists(atPath: item.path) {
                 try fm.copyItem(at: item, to: dest.appending(path: item.lastPathComponent))
                 saved += 1
             }
