@@ -111,6 +111,21 @@ if cliArgs.contains("--stress") {
     exit(0)
 }
 
+if cliArgs.contains("--settings") {
+    let mgr = AccountManager()
+    var dirs = [Paths.appSupportClaude]
+    for p in mgr.profiles {
+        let d = InstanceManager.dataDir(for: p.accountUuid)
+        if d != Paths.appSupportClaude, FileManager.default.fileExists(atPath: d.path) { dirs.append(d) }
+    }
+    print("=== 인스턴스 간 무엇이 공유되나 ===")
+    for line in SettingsSync.explain() { print("  \(line)") }
+    print("\n대상 인스턴스: \(dirs.count)개")
+    let r = SettingsSync.sync(dataDirs: dirs)
+    print("동기화 결과: 파일 \(r.filesCopied)개 복사, 키 \(r.keysMerged)개 병합")
+    exit(0)
+}
+
 // 메뉴바 전용 앱(LSUIElement). Dock/메뉴바 없이 상단 status item 만 띄운다.
 let app = NSApplication.shared
 let delegate = AppDelegate()
