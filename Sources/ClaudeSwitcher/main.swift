@@ -76,6 +76,17 @@ if cliArgs.contains("--instances") {
     exit(0)
 }
 
+if cliArgs.contains("--release-holds") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                    profiles: m.profiles)
+    let n = SessionLock.releaseAll(folders: folders)
+    print("보류본 회수: \(n)개")
+    let r = SessionSync.syncAll(folders: folders)
+    print("재동기화: 복사 \(r.copied)개")
+    exit(0)
+}
+
 if cliArgs.contains("--enforce-lock") {
     let m = AccountManager()
     let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid))

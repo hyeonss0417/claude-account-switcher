@@ -312,14 +312,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let folders = syncFolders()
         DispatchQueue.global(qos: .userInitiated).async {
             var copied = 0
+            var lockedOut = 0
             autoreleasepool {
                 // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
                 copied = SessionSync.syncAll(folders: folders).copied
+                // 그런 다음, 다른 창에서 **지금 진행 중**인 세션은 이 창에서 빼둔다.
+                // 창이 꺼져 있는 이 순간이 잠금이 실제로 효력을 갖는 유일한 시점이다.
+                let target = InstanceManager.sessionFolders(of: InstanceManager.dataDir(for: accountUuid))
+                let others = folders.filter { !target.contains($0) }
+                lockedOut = SessionLock.filterForLaunch(targetFolders: target, otherFolders: others)
             }
             SessionIndex.flushCaches()
             DispatchQueue.main.async { [weak self] in
                 InstanceManager.launch(accountUuid: accountUuid)
-                self?.setStatus("\(label) 실행 — 세션 \(copied)개 반영 완료")
+                var msg = "\(label) 실행 — 세션 \(copied)개 반영"
+                if lockedOut > 0 { msg += ", 다른 창 진행 중 \(lockedOut)개 제외" }
+                self?.setStatus(msg)
                 self?.populateMenu()
             }
         }

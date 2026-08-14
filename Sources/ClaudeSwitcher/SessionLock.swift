@@ -32,6 +32,52 @@ enum SessionLock {
               .standardizedFileURL.path
     }
 
+    /// **창을 띄우기 직전에만** 적용하는 잠금.
+    ///
+    /// 왜 이 시점뿐인가: Claude 는 세션 목록을 **시작할 때 한 번** 읽는다. 이미 떠 있는 창의 폴더에서
+    /// 인덱스를 빼도 화면에서는 사라지지 않으므로, 상시 잠금은 아무것도 막지 못하면서 파일만 계속
+    /// 옮긴다. 반대로 창이 뜨는 순간에 걸러내면 "다른 창에서 진행 중인 세션은 이 창에 안 뜬다"가
+    /// 실제로 성립한다. 대상 창은 이때 꺼져 있으므로 안전하게 정리할 수 있다.
+    ///
+    /// - Parameters:
+    ///   - targetFolders: 지금 채우고 있는(곧 실행될) 창의 세션 폴더들.
+    ///   - otherFolders: 다른 창들의 폴더 — 여기서 진행 중인 세션을 알아낸다.
+    /// - Returns: 이 창에서 감춘 세션 수.
+    @discardableResult
+    static func filterForLaunch(targetFolders: [URL], otherFolders: [URL]) -> Int {
+        guard !targetFolders.isEmpty, !otherFolders.isEmpty else { return 0 }
+        let fm = FileManager.default
+        let now = Date()
+
+        // 다른 창들에서 "지금 진행 중"인 세션 id 를 모은다(로그가 방금 쓰였는가로 판별).
+        var busy = Set<String>()
+        for folder in otherFolders {
+            autoreleasepool {
+                guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
+                for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+                    guard let idx = SessionIndex.load(item), let cli = idx.sessionId, !busy.contains(cli),
+                          let log = idx.logURL,
+                          let m = (try? log.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                    else { continue }
+                    if now.timeIntervalSince(m) < busyWindow { busy.insert(cli) }
+                }
+            }
+        }
+        guard !busy.isEmpty else { return 0 }
+
+        // 대상 창에서 그 세션들을 빼둔다(삭제가 아니라 보류 — 조용해지면 동기화가 되돌려 놓는다).
+        var hidden = 0
+        for folder in targetFolders {
+            guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
+            for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+                guard let idx = SessionIndex.load(item), let cli = idx.sessionId, busy.contains(cli) else { continue }
+                if hold(item, from: folder) { hidden += 1 }
+            }
+        }
+        if hidden > 0 { Log.info("실행 직전 잠금: 다른 창에서 진행 중인 세션 \(hidden)개를 이 창에서 제외") }
+        return hidden
+    }
+
     /// 진행 중인 세션을 비소유 인스턴스에서 감추고, 끝난 세션은 되돌린다.
     @discardableResult
     static func enforce(folders: [URL]) -> Status {
@@ -91,6 +137,13 @@ enum SessionLock {
         return status
     }
 
+    /// 조용해진(진행이 끝난) 보류본을 되돌린다 — 동기화 사이클에서 주기적으로 호출.
+    @discardableResult
+    static func releaseIdleAll(folders: [URL]) -> Int {
+        var logMTime: [String: Date] = [:]
+        return releaseIdle(folders: folders, logMTime: logMTime, now: Date())
+    }
+
     /// 보류 중인 모든 인덱스를 조건 없이 원래 폴더로 되돌린다(잠금이 불필요해졌을 때).
     @discardableResult
     static func releaseAll(folders: [URL]) -> Int {
@@ -121,7 +174,7 @@ enum SessionLock {
     }
 
     /// 더 이상 진행 중이 아닌 보류본을 원래 폴더로 되돌린다.
-    private static func releaseIdle(folders: [URL], logMTime: [String: Date], now: Date) -> Int {
+    static func releaseIdle(folders: [URL], logMTime: [String: Date], now: Date) -> Int {
         let fm = FileManager.default
         var released = 0
         for folder in folders {

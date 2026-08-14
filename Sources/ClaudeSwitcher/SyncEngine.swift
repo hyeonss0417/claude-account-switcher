@@ -88,12 +88,9 @@ final class SyncEngine {
                 result.skippedDead = r.skippedDead
                 result.deferredRunning = r.deferredRunning
 
-                // 인스턴스가 2개 이상일 때만 잠금이 의미가 있다(같은 인스턴스 폴더끼리는 감추면 안 됨).
-                if Set(f.map(SessionLock.instanceRoot)).count > 1 {
-                    let s = SessionLock.enforce(folders: f)
-                    result.lockHeld = s.busyHeld
-                    result.lockReleased = s.released
-                }
+                // 잠금은 **창이 뜨는 순간에만** 의미가 있다(Claude 는 시작할 때 한 번만 폴더를 읽는다).
+                // 그래서 상시 잠금은 하지 않고, 조용해진 보류본을 되돌리는 일만 한다.
+                result.lockReleased = SessionLock.releaseIdleAll(folders: f)
             }
             SessionIndex.flushCaches()
 
