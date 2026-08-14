@@ -87,6 +87,31 @@ if cliArgs.contains("--release-holds") {
     exit(0)
 }
 
+if cliArgs.contains("--link-mode") || cliArgs.contains("--unlink-mode") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                    profiles: m.profiles)
+    var running = Set<String>()
+    for (dirPath, _) in InstanceManager.runningDataDirs() {
+        for f in InstanceManager.sessionFolders(of: URL(fileURLWithPath: dirPath)) {
+            running.insert(f.standardizedFileURL.path)
+        }
+    }
+    if cliArgs.contains("--unlink-mode") {
+        print("공유 모드 해제: \(LinkMode.disable(folders: folders, runningFolders: running))개 폴더 복원")
+    } else {
+        let r = LinkMode.enable(folders: folders, runningFolders: running)
+        print("공유 모드 전환")
+        print("  링크로 교체: \(r.linked)개 폴더")
+        print("  실체로 통합: \(r.merged)개 세션")
+        print("  갈라진 상태 최신본으로 정리: \(r.conflictsResolved)개")
+        if !r.skippedRunning.isEmpty {
+            print("  ⚠ 실행 중이라 건너뜀: \(r.skippedRunning.count)개 — 그 창을 닫고 다시 실행하세요")
+        }
+    }
+    exit(0)
+}
+
 if cliArgs.contains("--enforce-lock") {
     let m = AccountManager()
     let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid))

@@ -282,6 +282,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dock.state = showDockIcon ? .on : .off
         let clean = addItem(to: menu, "빈 세션 자동 정리", #selector(toggleAutoClean))
         clean.state = autoCleanDead ? .on : .off
+        let share = addItem(to: menu, "세션 폴더 공유(아카이브까지 반영)", #selector(toggleLinkMode))
+        share.state = LinkMode.isEnabled(folders: syncFolders()) ? .on : .off
         menu.addItem(.separator())
         addItem(to: menu, "현재 로그인 저장(전환 대상 등록)", #selector(captureNow))
         addItem(to: menu, "빈 세션 정리(죽은 인덱스 격리)", #selector(cleanDead))
@@ -313,7 +315,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             var copied = 0
             var lockedOut = 0
+            var linked = 0
             autoreleasepool {
+                // 공유 모드가 켜져 있으면 이 창의 폴더도 링크로 바꾼다.
+                // 창이 꺼져 있는 지금이 유일하게 안전한 시점이다.
+                if LinkMode.isEnabled(folders: folders) {
+                    let target = InstanceManager.sessionFolders(of: InstanceManager.dataDir(for: accountUuid))
+                    linked = LinkMode.enable(folders: target, runningFolders: []).linked
+                }
                 // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
                 copied = SessionSync.syncAll(folders: folders).copied
                 // 그런 다음, 다른 창에서 **지금 진행 중**인 세션은 이 창에서 빼둔다.
@@ -418,6 +427,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func syncNow() { runSyncInBackground(quiet: false) }
+    /// 공유 모드 토글.
+    ///
+    /// 켜면 모든 계정 폴더가 **하나의 실체**를 가리켜 사본 자체가 사라진다.
+    /// 복사 방식에서는 "없는 파일만 채우기"라 아카이브 같은 **상태 변경이 전파되지 않았다**
+    /// (실측: 512개 중 209개가 아카이브 상태 불일치). 공유하면 애초에 갈라질 수가 없다.
+    @objc private func toggleLinkMode() {
+        let folders = syncFolders()
+        let on = LinkMode.isEnabled(folders: folders)
+        let running = foldersOfRunningWindows()
+        let alert = NSAlert()
+        alert.messageText = on ? "세션 폴더 공유를 끌까요?" : "세션 폴더를 공유할까요?"
+        alert.informativeText = on
+            ? "각 계정이 자기 사본을 갖는 예전 방식으로 돌아갑니다. 아카이브 같은 상태 변경은 다시 갈라질 수 있습니다."
+            : "모든 계정이 같은 세션 폴더를 보게 됩니다.\n"
+              + "한 창에서 아카이브하면 다른 창에도 반영되고(표시는 그 창 재시작 시), 사본이 없어 대량 복사도 사라집니다.\n"
+              + "실행 중인 창은 다음 재시작 때 자동 전환됩니다. 원본은 백업에 보관합니다."
+        alert.addButton(withTitle: on ? "끄기" : "켜기")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if on {
+            let n = LinkMode.disable(folders: folders, runningFolders: running)
+            setStatus("공유 모드 해제 — \(n)개 폴더 복원")
+        } else {
+            let r = LinkMode.enable(folders: folders, runningFolders: running)
+            var msg = "공유 모드 — 링크 \(r.linked)개, 상태 정리 \(r.conflictsResolved)개"
+            if !r.skippedRunning.isEmpty { msg += " (실행 중 \(r.skippedRunning.count)개는 재시작 때)" }
+            setStatus(msg)
+        }
+        populateMenu()
+    }
+
     @objc private func toggleAutoClean() {
         autoCleanDead.toggle()
         setStatus("빈 세션 자동 정리: \(autoCleanDead ? "켜짐" : "꺼짐")")
