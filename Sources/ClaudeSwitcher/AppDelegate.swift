@@ -106,6 +106,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Log.info("Claude \(launched ? "실행" : "종료") 감지 → 동기화")
                 // 종료 시점에는 그 창의 폴더에도 채워 넣어야 다음 실행에서 전부 보인다.
                 self?.runSyncInBackground(quiet: true, includeRunning: !launched)
+                if !launched {
+                    // 종료 직후가 인덱스 유실이 드러나는 시점이다 — 바로 되살린다.
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        guard let folders = self?.syncFolders(), !folders.isEmpty else { return }
+                        let orphans = OrphanSessions.find(folders: folders)
+                        if !orphans.isEmpty {
+                            let n = OrphanSessions.recover(orphans, into: folders)
+                            if n > 0 { Log.info("종료 후 유실 세션 복구: \(n)개") }
+                        }
+                    }
+                }
             }
         }
     }
@@ -319,7 +330,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var copied = 0
             var lockedOut = 0
             var linked = 0
+            var revived = 0
             autoreleasepool {
+                // 창을 띄우기 **직전에** 인덱스가 유실된 세션을 되살린다.
+                // Claude 는 세션 인덱스를 곧바로 쓰지 않는 경우가 있어, 방금 만든 세션이
+                // 인덱스 없이 남아 있을 수 있다. 주기 복구(30분)를 기다리면 그 사이 재시작한
+                // 사용자에겐 세션이 사라진 것으로 보인다 — 그래서 여기서 먼저 확인한다.
+                let orphans = OrphanSessions.find(folders: folders)
+                if !orphans.isEmpty { revived = OrphanSessions.recover(orphans, into: folders) }
                 // 공유 모드가 켜져 있으면 이 창의 폴더도 링크로 바꾼다.
                 // 창이 꺼져 있는 지금이 유일하게 안전한 시점이다.
                 if LinkMode.isEnabled(folders: folders) {

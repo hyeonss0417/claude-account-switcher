@@ -121,15 +121,24 @@ enum InstanceManager {
     }
 
     /// 창이 완전히 종료될 때까지 기다린다(파일을 안전하게 채워 넣기 위한 선행 조건).
+    ///
+    /// ⚠️ 강제 종료는 최후의 수단이다. Claude 는 종료 과정에서 세션 인덱스를 기록하는데,
+    /// 성급히 죽이면 **방금 만든 세션이 인덱스 없이 남아 목록에서 사라진다**(실측 사례).
+    /// 그래서 넉넉히 기다린다.
     static func quitAndWait(pid: pid_t) {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return }
         app.terminate()
-        let deadline = Date().addingTimeInterval(8)
+        let deadline = Date().addingTimeInterval(25)
         while Date() < deadline, !app.isTerminated {
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
-        if !app.isTerminated { app.forceTerminate(); RunLoop.current.run(until: Date().addingTimeInterval(1)) }
-        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+        if !app.isTerminated {
+            Log.info("정상 종료 지연 → 강제 종료(세션 인덱스가 기록되지 않았을 수 있음)")
+            app.forceTerminate()
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+        }
+        // 종료 직후 디스크 기록이 끝날 여유
+        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
     }
 
     // MARK: - 생성 / 실행
