@@ -21,6 +21,7 @@ final class SyncEngine {
         var quarantined = 0
         var lockHeld = 0
         var lockReleased = 0
+        var orphansRecovered = 0     // 인덱스가 유실됐다 되살린 세션 수
         var deferredRunning = 0      // 실행 중인 창이라 미룬 복사(종료/재실행 때 반영)
         var skipped = false          // 최소 간격/중복 실행으로 건너뜀
     }
@@ -29,6 +30,7 @@ final class SyncEngine {
     private var running = false
     private var lastRun = Date.distantPast
     private var lastQuarantine = Date.distantPast
+    private var lastOrphanScan = Date.distantPast
     /// 이 시각까지는 감시자 이벤트를 무시한다(우리가 쓴 파일이 되돌아오는 것을 차단).
     private var ignoreWatchUntil = Date.distantPast
     private let lock = NSLock()
@@ -39,6 +41,9 @@ final class SyncEngine {
     private let selfWriteWindow: TimeInterval = 15
     /// 죽은 인덱스 격리는 비싸므로 이 간격으로만 수행한다.
     private let quarantineInterval: TimeInterval = 30 * 60
+    /// 고아 세션(인덱스 유실) 복구 주기. Claude 가 비정상 종료되면 인덱스가 기록되지 못해
+    /// 로그만 남고 목록에서 사라지므로, 주기적으로 되살린다.
+    private let orphanInterval: TimeInterval = 30 * 60
 
     /// 감시자 이벤트를 받아들일지 판단.
     func shouldAcceptWatchEvent() -> Bool {
@@ -91,6 +96,16 @@ final class SyncEngine {
                 // 잠금은 **창이 뜨는 순간에만** 의미가 있다(Claude 는 시작할 때 한 번만 폴더를 읽는다).
                 // 그래서 상시 잠금은 하지 않고, 조용해진 보류본을 되돌리는 일만 한다.
                 result.lockReleased = SessionLock.releaseIdleAll(folders: f)
+
+                // 인덱스가 유실된 세션 되살리기 —
+                // Claude 가 비정상 종료되면 세션은 로그만 남고 목록에서 사라진다.
+                if Date().timeIntervalSince(self.lastOrphanScan) > self.orphanInterval {
+                    self.lastOrphanScan = Date()
+                    let orphans = OrphanSessions.find(folders: f)
+                    if !orphans.isEmpty {
+                        result.orphansRecovered = OrphanSessions.recover(orphans, into: f)
+                    }
+                }
             }
             SessionIndex.flushCaches()
 

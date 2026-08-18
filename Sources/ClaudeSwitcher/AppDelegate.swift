@@ -161,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                       includeRunning ? [] : (self?.foldersOfRunningWindows() ?? [])
                                   }) { [weak self] r in
             guard !r.skipped else { return }
+            if r.orphansRecovered > 0 {
+                Log.info("고아 세션 복구: \(r.orphansRecovered)개 (비정상 종료로 인덱스 유실)")
+            }
             if r.copied > 0 || r.quarantined > 0 {
                 Log.info("동기화: 복사 \(r.copied), 격리 \(r.quarantined), 잠금 \(r.lockHeld)")
             }

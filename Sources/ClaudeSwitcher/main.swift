@@ -112,6 +112,24 @@ if cliArgs.contains("--link-mode") || cliArgs.contains("--unlink-mode") {
     exit(0)
 }
 
+if cliArgs.contains("--find-orphans") || cliArgs.contains("--recover-orphans") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                    profiles: m.profiles)
+    let found = OrphanSessions.find(folders: folders)
+    print("인덱스 없이 묻힌 세션: \(found.count)개")
+    for f in found.prefix(40) {
+        print("  \(f.bytes/1024)KB  \(f.title)")
+    }
+    if cliArgs.contains("--recover-orphans") {
+        let n = OrphanSessions.recover(found, into: folders)
+        print("\n복구 완료: \(n)개 — Claude 창을 재시작하면 목록에 나타납니다.")
+    } else if !found.isEmpty {
+        print("\n복구하려면: --recover-orphans")
+    }
+    exit(0)
+}
+
 if cliArgs.contains("--enforce-lock") {
     let m = AccountManager()
     let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid))

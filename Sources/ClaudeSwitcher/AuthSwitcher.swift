@@ -110,6 +110,9 @@ enum AuthSwitcher {
     }
 
     /// 종료 요청 후 실제로 프로세스가 사라질 때까지 대기(최대 ~8초). 안 죽으면 강제 종료.
+    ///
+    /// ⚠️ 이 함수는 **떠 있는 모든 Claude 창**을 닫는다. 여러 계정을 동시에 쓰는 지금은
+    /// 관계없는 창까지 닫히므로, 특정 창만 닫아야 할 때는 `InstanceManager.quitAndWait(pid:)` 를 쓸 것.
     static func quitClaudeAndWait() {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == claudeBundleId }
         guard !apps.isEmpty else { return }

@@ -109,9 +109,13 @@ enum InstanceManager {
         let base = instanceDir.appending(path: "claude-code-sessions", directoryHint: .isDirectory)
         var out: [URL] = []
         guard let accts = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return out }
+        var seen = Set<String>()
         for a in accts where UUID(uuidString: a.lastPathComponent) != nil {
             guard let orgs = try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil) else { continue }
-            for o in orgs where UUID(uuidString: o.lastPathComponent) != nil { out.append(o) }
+            for o in orgs where UUID(uuidString: o.lastPathComponent) != nil {
+                let real = o.resolvingSymlinksInPath()          // 링크면 실제 폴더로
+                if seen.insert(real.standardizedFileURL.path).inserted { out.append(real) }
+            }
         }
         return out
     }
@@ -208,12 +212,19 @@ enum InstanceManager {
             if fm.fileExists(atPath: base.path) { roots.append(base) }
         }
         var folders: [URL] = []
+        var seen = Set<String>()
         for root in roots {
             guard let accts = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { continue }
             for a in accts {
                 guard UUID(uuidString: a.lastPathComponent) != nil else { continue }
                 guard let orgs = try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil) else { continue }
-                for o in orgs where UUID(uuidString: o.lastPathComponent) != nil { folders.append(o) }
+                for o in orgs where UUID(uuidString: o.lastPathComponent) != nil {
+                    // ⚠️ 공유 모드에서 이 경로는 심볼릭 링크다. FileManager 의 디렉터리 열거는
+                    // **링크를 따라가지 않아 빈 목록을 돌려준다**(실측: 전 폴더가 0개로 보여
+                    // 동기화가 조용히 무동작이 됐다). 반드시 실제 경로로 해석해서 쓴다.
+                    let real = o.resolvingSymlinksInPath()
+                    if seen.insert(real.standardizedFileURL.path).inserted { folders.append(real) }
+                }
             }
         }
         return folders
