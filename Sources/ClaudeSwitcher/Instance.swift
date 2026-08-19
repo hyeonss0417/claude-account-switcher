@@ -141,6 +141,75 @@ enum InstanceManager {
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
     }
 
+    // MARK: - 새 계정 추가
+    /// 아직 이 맥에서 한 번도 로그인하지 않은 계정을 추가한다.
+    ///
+    /// 계정 UUID 는 **로그인해야 알 수 있으므로**, 임시 이름의 데이터 디렉터리를 만들어 먼저 띄운다.
+    /// 로그인하면 그 디렉터리의 config.json 에 `lastKnownAccountUuid` 가 적히고,
+    /// 그때 `adoptPendingInstances()` 가 폴더 이름을 실제 계정 UUID 로 바꿔 정식 등록한다.
+    @discardableResult
+    static func addNewAccount() -> URL? {
+        let fm = FileManager.default
+        let stamp = Int(Date().timeIntervalSince1970)
+        let dir = instancesRoot.appending(path: "pending-\(stamp)", directoryHint: .isDirectory)
+        do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        catch { Log.error("새 계정 디렉터리 생성 실패: \(error.localizedDescription)"); return nil }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-n", "-a", "/Applications/Claude.app", "--args", "--user-data-dir=\(dir.path)"]
+        do { try task.run() } catch {
+            Log.error("새 계정 창 실행 실패: \(error.localizedDescription)"); return nil
+        }
+        Log.info("새 계정 창 실행: \(dir.lastPathComponent) (로그인하면 자동 등록)")
+        return dir
+    }
+
+    /// 로그인이 끝난 임시 인스턴스를 실제 계정 UUID 로 등록한다.
+    /// 실행 중인 창은 건드리지 않는다(폴더 이름 변경은 꺼져 있을 때만 안전).
+    /// - Returns: 이번에 등록된 (계정UUID, 조직UUID) 목록.
+    @discardableResult
+    static func adoptPendingInstances() -> [(String, String)] {
+        let fm = FileManager.default
+        var adopted: [(String, String)] = []
+        guard let items = try? fm.contentsOfDirectory(at: instancesRoot, includingPropertiesForKeys: nil) else { return adopted }
+        let running = runningDataDirs()
+
+        for dir in items where dir.lastPathComponent.hasPrefix("pending-") {
+            guard let acct = WebSession.loggedInAccount(dataDir: dir) else { continue }   // 아직 로그인 전
+            if running[dir.standardizedFileURL.path] != nil {
+                Log.info("새 계정 \(acct.prefix(8)): 창이 켜져 있어 등록 보류(닫으면 등록)")
+                continue
+            }
+            let target = instancesRoot.appending(path: acct, directoryHint: .isDirectory)
+            do {
+                if fm.fileExists(atPath: target.path) {
+                    // 이미 그 계정 인스턴스가 있으면 임시본은 버린다(로그인은 스냅샷으로 남긴다)
+                    WebSession.snapshot(accountUuid: acct, from: dir)
+                    try fm.removeItem(at: dir)
+                } else {
+                    try fm.moveItem(at: dir, to: target)
+                    WebSession.snapshot(accountUuid: acct, from: target)
+                }
+            } catch {
+                Log.error("새 계정 등록 실패 \(acct.prefix(8)): \(error.localizedDescription)")
+                continue
+            }
+            // 조직 UUID 는 그 인스턴스의 세션 폴더 구조에서 읽는다
+            var org = ""
+            let base = target.appending(path: "claude-code-sessions", directoryHint: .isDirectory)
+            if let accts = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil),
+               let a = accts.first(where: { $0.lastPathComponent == acct }),
+               let orgs = try? fm.contentsOfDirectory(at: a, includingPropertiesForKeys: nil),
+               let o = orgs.first(where: { UUID(uuidString: $0.lastPathComponent) != nil }) {
+                org = o.lastPathComponent
+            }
+            adopted.append((acct, org))
+            Log.info("새 계정 등록 완료: \(acct.prefix(8))")
+        }
+        return adopted
+    }
+
     // MARK: - 생성 / 실행
     /// 인스턴스 데이터 디렉터리를 만들고, 저장된 웹세션으로 시드해 **로그인된 상태로** 시작하게 한다.
     @discardableResult

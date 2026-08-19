@@ -116,6 +116,22 @@ final class AccountManager {
     }
 
     // MARK: - 갱신 / 시드
+    /// 새로 등록된 계정을 프로필에 넣는다(이미 있으면 조직만 갱신).
+    @discardableResult
+    func addProfileIfMissing(accountUuid: String, organizationUuid: String) -> Bool {
+        if let i = profiles.firstIndex(where: { $0.accountUuid == accountUuid }) {
+            if !organizationUuid.isEmpty { profiles[i].organizationUuid = organizationUuid }
+            save()
+            return false
+        }
+        profiles.append(Profile(accountUuid: accountUuid, organizationUuid: organizationUuid,
+                                email: nil, displayName: nil, label: nil, rateLimitTier: nil,
+                                oauthAccountRaw: nil, userID: nil))
+        save()
+        Log.info("프로필 추가: \(accountUuid.prefix(8))")
+        return true
+    }
+
     func refreshFromDisk() {
         // 발견된 폴더마다 프로필 보장
         for f in discoverFolders() where !profiles.contains(where: { $0.accountUuid == f.accountUuid }) {

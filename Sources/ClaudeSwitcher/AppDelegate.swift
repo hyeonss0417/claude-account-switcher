@@ -107,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 종료 시점에는 그 창의 폴더에도 채워 넣어야 다음 실행에서 전부 보인다.
                 self?.runSyncInBackground(quiet: true, includeRunning: !launched)
                 if !launched {
+                    self?.adoptNewAccounts()   // 로그인 후 닫힌 임시 창을 계정으로 등록
                     // 종료 직후가 인덱스 유실이 드러나는 시점이다 — 바로 되살린다.
                     DispatchQueue.global(qos: .utility).async { [weak self] in
                         guard let folders = self?.syncFolders(), !folders.isEmpty else { return }
@@ -238,6 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 메뉴 내용 구성(상태 아이콘용·Dock 팝업용 공통).
     private func build(into menu: NSMenu) {
+        adoptNewAccounts()          // 로그인 끝난 새 계정이 있으면 먼저 등록
         manager.refreshFromDisk()
         let active = manager.activeAccountUuid()
 
@@ -286,6 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(info)
         }
 
+        addItem(to: menu, "＋ 새 계정 추가…", #selector(addAccount))
         menu.addItem(.separator())
         addItem(to: menu, "지금 세션 동기화", #selector(syncNow), key: "s")
         let auto = addItem(to: menu, "자동 동기화 (30초)", #selector(toggleAutoSync))
@@ -445,6 +448,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         setStatus(result.message)
         populateMenu()
+    }
+
+    /// 아직 이 맥에 없는 계정을 추가한다.
+    /// 계정 UUID 는 로그인 전엔 알 수 없으므로 임시 창을 띄우고,
+    /// 로그인하면 그 창의 config.json 에서 계정을 읽어 자동 등록한다.
+    @objc private func addAccount() {
+        let alert = NSAlert()
+        alert.messageText = "새 계정을 추가할까요?"
+        alert.informativeText = "빈 Claude 창이 하나 열립니다. 그 창에서 추가할 계정으로 로그인하세요.\n"
+            + "로그인한 뒤 창을 닫으면 자동으로 계정 목록에 등록되고, 세션도 함께 통합됩니다."
+        alert.addButton(withTitle: "창 열기")
+        alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if InstanceManager.addNewAccount() != nil {
+            setStatus("새 계정 창 열림 — 로그인 후 창을 닫으면 등록됩니다")
+        } else {
+            setStatus("새 계정 창 실행 실패 — 로그 확인")
+        }
+    }
+
+    /// 로그인이 끝난 임시 인스턴스를 계정으로 등록(창이 닫힌 뒤에만 수행).
+    private func adoptNewAccounts() {
+        for (acct, org) in InstanceManager.adoptPendingInstances() {
+            manager.addProfileIfMissing(accountUuid: acct, organizationUuid: org)
+            setStatus("새 계정 등록됨 — \(acct.prefix(8))")
+        }
     }
 
     @objc private func syncNow() { runSyncInBackground(quiet: false) }
