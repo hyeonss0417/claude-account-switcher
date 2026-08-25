@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.runSyncInBackground(quiet: true)
         }
+        refreshWindowLabels()
         startWatching()
         observeClaudeLifecycle()
         captureInstanceLoginsIfNeeded()
@@ -104,6 +105,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard app?.bundleIdentifier == AuthSwitcher.claudeBundleId else { return }
                 let launched = name == NSWorkspace.didLaunchApplicationNotification
                 Log.info("Claude \(launched ? "실행" : "종료") 감지 → 동기화")
+                if launched {
+                    self?.refreshWindowLabels()
+                } else if let pid = app?.processIdentifier {
+                    // 어느 창이 왜 닫혔는지 남긴다(크래시 덤프가 안 남는 종료를 사후 추적하기 위해).
+                    let label = self?.windowLabels[pid] ?? "알 수 없는 창"
+                    let up = self?.windowStarts[pid].map { Date().timeIntervalSince($0) }
+                    CrashWatch.recordTermination(label: label, pid: pid, uptime: up ?? nil)
+                    self?.windowLabels[pid] = nil
+                    self?.windowStarts[pid] = nil
+                }
                 // 종료 시점에는 그 창의 폴더에도 채워 넣어야 다음 실행에서 전부 보인다.
                 self?.runSyncInBackground(quiet: true, includeRunning: !launched)
                 if !launched {
@@ -127,6 +138,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var autoCleanDead: Bool {
         get { UserDefaults.standard.object(forKey: Self.autoCleanKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: Self.autoCleanKey) }
+    }
+
+    /// pid → 어느 계정 창인지. 프로세스가 사라진 뒤에는 알아낼 수 없어 미리 캐시해 둔다.
+    private var windowLabels: [pid_t: String] = [:]
+    private var windowStarts: [pid_t: Date] = [:]
+
+    /// 실행 중인 창 목록을 훑어 라벨/시작시각을 갱신.
+    private func refreshWindowLabels() {
+        for (dirPath, pid) in InstanceManager.runningDataDirs() {
+            let acct = WebSession.loggedInAccount(dataDir: URL(fileURLWithPath: dirPath))
+            let label = acct.flatMap { a in manager.profiles.first { $0.accountUuid == a }?.displayLabel }
+                ?? URL(fileURLWithPath: dirPath).lastPathComponent
+            windowLabels[pid] = label
+            if windowStarts[pid] == nil {
+                windowStarts[pid] = NSRunningApplication(processIdentifier: pid)?.launchDate ?? Date()
+            }
+        }
     }
 
     private var busyCountCache = 0
@@ -307,6 +335,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addItem(to: menu, "가려진 세션 복구(worktree 재활용)", #selector(unshadowNow))
         addItem(to: menu, "백업 폴더 열기", #selector(openBackups))
         addItem(to: menu, "로그 열기", #selector(openLog))
+        let quits = CrashWatch.incidentCount()
+        if quits > 0 {
+            addItem(to: menu, "예기치 않은 종료 기록 \(quits)건 열기", #selector(openQuitLog))
+        }
         menu.addItem(.separator())
         addItem(to: menu, "종료", #selector(quit), key: "q")
     }
@@ -327,7 +359,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 그래서 여기서는 동기화가 끝날 때까지 기다렸다가 실행한다.
     private func syncThenLaunch(accountUuid: String, quitFirst pid: pid_t?, label: String) {
         setStatus("\(label): 세션 동기화 중…")
-        if let pid { InstanceManager.quitAndWait(pid: pid) }   // 먼저 닫아야 안전하게 채운다
+        if let pid {
+            CrashWatch.markIntentionalQuit()          // 이 종료는 사고가 아니다
+            InstanceManager.quitAndWait(pid: pid)     // 먼저 닫아야 안전하게 채운다
+        }
         let folders = syncFolders()
         DispatchQueue.global(qos: .userInitiated).async {
             var copied = 0
@@ -603,6 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openBackups() { NSWorkspace.shared.open(Paths.backupsDir) }
     @objc private func openLog() { NSWorkspace.shared.open(Paths.logFile) }
+    @objc private func openQuitLog() { NSWorkspace.shared.open(CrashWatch.incidentFile) }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func setStatus(_ msg: String) {

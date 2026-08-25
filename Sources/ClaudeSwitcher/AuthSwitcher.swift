@@ -114,6 +114,7 @@ enum AuthSwitcher {
     /// ⚠️ 이 함수는 **떠 있는 모든 Claude 창**을 닫는다. 여러 계정을 동시에 쓰는 지금은
     /// 관계없는 창까지 닫히므로, 특정 창만 닫아야 할 때는 `InstanceManager.quitAndWait(pid:)` 를 쓸 것.
     static func quitClaudeAndWait() {
+        CrashWatch.markIntentionalQuit()   // 사용자가 지시한 종료 — 사고로 세지 않는다
         let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == claudeBundleId }
         guard !apps.isEmpty else { return }
         for app in apps { app.terminate() }
