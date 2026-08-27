@@ -79,4 +79,32 @@ enum CrashWatch {
     }
 
     static var incidentFile: URL { Paths.appDir.appending(path: "unexpected-quits.log") }
+
+    /// Claude 자체 로그를 보고 **자동 업데이트 때문에 종료된 것인지** 판별한다.
+    ///
+    /// 실측으로 확인된 원인: Claude 데스크탑은 유휴 상태가 되면 `stealth-update` 로 스스로 종료하고
+    /// 업데이트를 설치한다. 그런데 `--user-data-dir` 로 띄운 계정 창은 그 뒤 **다시 살아나지 않는다**
+    /// (업데이터의 재실행이 그 인자를 모른다). 사용자에겐 "쓰다가 앱이 꺼졌다"로 보인다.
+    static func wasUpdateQuit(within seconds: TimeInterval = 180) -> Bool {
+        let log = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Logs/Claude/main.log")
+        guard let handle = try? FileHandle(forReadingFrom: log) else { return false }
+        defer { try? handle.close() }
+        // 로그가 크므로 끝부분만 본다.
+        let size = (try? handle.seekToEnd()) ?? 0
+        let window: UInt64 = 128 * 1024
+        try? handle.seek(toOffset: size > window ? size - window : 0)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return false }
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        let cutoff = Date().addingTimeInterval(-seconds)
+        for line in text.split(separator: "\n").reversed() {
+            guard line.contains("stealth-update") || line.contains("beforeQuitForUpdate") else { continue }
+            let stamp = String(line.prefix(19))
+            if let d = fmt.date(from: stamp), d >= cutoff { return true }
+        }
+        return false
+    }
 }

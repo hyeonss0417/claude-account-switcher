@@ -112,8 +112,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let label = self?.windowLabels[pid] ?? "알 수 없는 창"
                     let up = self?.windowStarts[pid].map { Date().timeIntervalSince($0) }
                     CrashWatch.recordTermination(label: label, pid: pid, uptime: up ?? nil)
+                    let acct = self?.windowAccounts[pid]
                     self?.windowLabels[pid] = nil
                     self?.windowStarts[pid] = nil
+                    self?.windowAccounts[pid] = nil
+                    if let acct { self?.reopenAfterUnexpectedQuit(accountUuid: acct, label: label) }
                 }
                 // 종료 시점에는 그 창의 폴더에도 채워 넣어야 다음 실행에서 전부 보인다.
                 self?.runSyncInBackground(quiet: true, includeRunning: !launched)
@@ -133,6 +136,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// 예기치 않게 닫힌 계정 창을 다시 연다.
+    ///
+    /// 원인은 대부분 Claude 자체 자동 업데이트(`stealth-update`)다. 업데이트가 끝나면 앱이 스스로
+    /// 재실행되지만, `--user-data-dir` 로 띄운 계정 창은 **그 인자를 모른 채 복구되지 않는다**.
+    /// 그래서 여기서 같은 데이터 디렉터리로 다시 띄워준다(업데이트 설치가 끝나도록 잠깐 기다린 뒤).
+    private func reopenAfterUnexpectedQuit(accountUuid: String, label: String) {
+        guard autoReopen, CrashWatch.isIntentional() == false else { return }
+
+        // 폭주 방지: 한 시간에 3회까지만 자동 복구
+        let now = Date()
+        var history = (relaunchHistory[accountUuid] ?? []).filter { now.timeIntervalSince($0) < 3600 }
+        guard history.count < 3 else {
+            Log.error("자동 복구 중단(\(label)): 1시간 내 3회를 넘어섬 — 반복 종료 원인을 확인하세요")
+            relaunchHistory[accountUuid] = history
+            return
+        }
+        history.append(now)
+        relaunchHistory[accountUuid] = history
+
+        let byUpdate = CrashWatch.wasUpdateQuit()
+        Log.info("자동 복구 예약: \(label) — 원인 \(byUpdate ? "자동 업데이트" : "불명")")
+        // 업데이트 설치 중이면 번들이 교체되는 중이라 조금 기다렸다 띄운다.
+        let delay: TimeInterval = byUpdate ? 20 : 5
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            // 그 사이 사용자가 직접 열었으면 건너뛴다.
+            let dir = InstanceManager.dataDir(for: accountUuid).standardizedFileURL.path
+            if InstanceManager.runningDataDirs()[dir] != nil {
+                Log.info("자동 복구 생략(\(label)): 이미 실행 중")
+                return
+            }
+            self.syncThenLaunch(accountUuid: accountUuid, quitFirst: nil, label: "\(label) (자동 복구)")
+        }
+    }
+
     /// 죽은 인덱스를 동기화 때마다 자동 격리할지. 켜두면 계정 간 세션 수가 항상 같게 유지된다.
     private static let autoCleanKey = "autoCleanDeadIndexes"
     private var autoCleanDead: Bool {
@@ -143,6 +181,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// pid → 어느 계정 창인지. 프로세스가 사라진 뒤에는 알아낼 수 없어 미리 캐시해 둔다.
     private var windowLabels: [pid_t: String] = [:]
     private var windowStarts: [pid_t: Date] = [:]
+    private var windowAccounts: [pid_t: String] = [:]      // pid → 계정 UUID(인스턴스 창일 때)
+    private var relaunchHistory: [String: [Date]] = [:]    // 계정별 자동 복구 이력(폭주 방지)
+
+    /// 창이 닫히면 자동으로 다시 열지. 기본 켜짐.
+    private static let autoReopenKey = "autoReopenClosedWindow"
+    private var autoReopen: Bool {
+        get { UserDefaults.standard.object(forKey: Self.autoReopenKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Self.autoReopenKey) }
+    }
 
     /// 실행 중인 창 목록을 훑어 라벨/시작시각을 갱신.
     private func refreshWindowLabels() {
@@ -151,6 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let label = acct.flatMap { a in manager.profiles.first { $0.accountUuid == a }?.displayLabel }
                 ?? URL(fileURLWithPath: dirPath).lastPathComponent
             windowLabels[pid] = label
+            if let a = acct, InstanceManager.dataDir(for: a).standardizedFileURL.path == URL(fileURLWithPath: dirPath).standardizedFileURL.path {
+                windowAccounts[pid] = a           // 인스턴스 창 → 자동 복구 대상
+            }
             if windowStarts[pid] == nil {
                 windowStarts[pid] = NSRunningApplication(processIdentifier: pid)?.launchDate ?? Date()
             }
@@ -327,6 +377,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dock.state = showDockIcon ? .on : .off
         let clean = addItem(to: menu, "빈 세션 자동 정리", #selector(toggleAutoClean))
         clean.state = autoCleanDead ? .on : .off
+        let reopen = addItem(to: menu, "창이 닫히면 자동으로 다시 열기", #selector(toggleAutoReopen))
+        reopen.state = autoReopen ? .on : .off
         let share = addItem(to: menu, "세션 폴더 공유(아카이브까지 반영)", #selector(toggleLinkMode))
         share.state = LinkMode.isEnabled(folders: syncFolders()) ? .on : .off
         menu.addItem(.separator())
@@ -543,6 +595,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             setStatus(msg)
         }
         populateMenu()
+    }
+
+    @objc private func toggleAutoReopen() {
+        autoReopen.toggle()
+        setStatus("자동 다시 열기: \(autoReopen ? "켜짐" : "꺼짐")")
     }
 
     @objc private func toggleAutoClean() {
