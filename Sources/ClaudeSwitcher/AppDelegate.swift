@@ -130,6 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             let n = OrphanSessions.recover(orphans, into: folders)
                             if n > 0 { Log.info("종료 후 유실 세션 복구: \(n)개") }
                         }
+                        // 복구 뒤엔 같은 대화를 두 번 가리키는 인덱스가 생길 수 있어 곧바로 접는다.
+                        SessionSync.dedupeDuplicates(folders: folders)
                     }
                 }
             }
@@ -474,6 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 사용자에겐 세션이 사라진 것으로 보인다 — 그래서 여기서 먼저 확인한다.
                 let orphans = OrphanSessions.find(folders: folders)
                 if !orphans.isEmpty { revived = OrphanSessions.recover(orphans, into: folders) }
+                SessionSync.dedupeDuplicates(folders: folders)   // 복구가 만든 중복은 창이 뜨기 전에 정리
                 // 공유 모드가 켜져 있으면 이 창의 폴더도 링크로 바꾼다.
                 // 창이 꺼져 있는 지금이 유일하게 안전한 시점이다.
                 if LinkMode.isEnabled(folders: folders) {

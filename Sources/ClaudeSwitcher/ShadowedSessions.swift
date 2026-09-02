@@ -96,7 +96,9 @@ enum ShadowedSessions {
             obj.removeValue(forKey: "worktreePath")
             obj.removeValue(forKey: "worktreeName")
             obj["title"] = "\(t.title) (복구)"
-            guard let data = try? JSONSerialization.data(withJSONObject: obj) else { continue }
+            // 키 정렬: cliSessionId·cwd 가 앞쪽에 와야 헤드 스캔(앞 16KB)이 인식한다.
+            // 정렬 없이 쓰면 큰 필드 뒤로 밀려 '인덱스 없음'으로 오판 → 재시작마다 사본이 하나씩 늘었다.
+            guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { continue }
             for folder in folders {
                 let p = folder.appending(path: "\(newId).json")
                 try? data.write(to: p, options: .atomic)

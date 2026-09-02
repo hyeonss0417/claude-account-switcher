@@ -61,7 +61,10 @@ struct SessionIndex {
             let origin = Self.scanString(text, key: "originCwd")
             let title = Self.scanString(text, key: "title")
 
-            guard (cli ?? sid) != nil, (cwd ?? origin) != nil else { return }   // 못 찾으면 폴백
+            // cliSessionId 는 로그 파일명과 같은 진짜 세션 id 다. 헤드에 없으면(키가 뒤로 밀린 파일)
+            // 반드시 전체 파싱으로 확인해야 한다 — 안 그러면 sessionId(local_…)를 대신 써서
+            // '인덱스 없음'으로 오판하고 고아 복구가 사본을 계속 만든다.
+            guard cli != nil, (cwd ?? origin) != nil else { return }   // 못 찾으면 폴백
             result = SessionIndex(url: url, sessionId: cli ?? sid,
                                   cwd: cwd ?? origin, title: title, modified: mtime,
                                   lastActivity: Self.scanNumber(text, key: "lastActivityAt") ?? 0)
