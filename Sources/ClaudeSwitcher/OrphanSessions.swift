@@ -114,6 +114,7 @@ enum OrphanSessions {
             obj["originCwd"] = origin
             obj["title"] = item.title
             obj["titleSource"] = "user"
+            obj["recoveredBy"] = "orphan"   // 중복 정리 때 우리 사본임을 식별
             obj["branch"] = item.branch
             obj["isArchived"] = false
             obj["createdAt"] = Int(item.firstSeen)

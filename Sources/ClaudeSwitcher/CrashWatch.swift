@@ -80,6 +80,17 @@ enum CrashWatch {
 
     static var incidentFile: URL { Paths.appDir.appending(path: "unexpected-quits.log") }
 
+    /// 업데이터(ShipIt)가 아직 번들을 교체 중인가.
+    static func updaterRunning() -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        task.arguments = ["-f", "claudefordesktop.ShipIt"]
+        task.standardOutput = Pipe()
+        guard (try? task.run()) != nil else { return false }
+        task.waitUntilExit()
+        return task.terminationStatus == 0
+    }
+
     /// Claude 자체 로그를 보고 **자동 업데이트 때문에 종료된 것인지** 판별한다.
     ///
     /// 실측으로 확인된 원인: Claude 데스크탑은 유휴 상태가 되면 `stealth-update` 로 스스로 종료하고

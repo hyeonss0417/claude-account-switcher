@@ -76,6 +76,15 @@ if cliArgs.contains("--instances") {
     exit(0)
 }
 
+if cliArgs.contains("--dedupe") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                    profiles: m.profiles)
+    let n = SessionSync.dedupeDuplicates(folders: folders)
+    print("중복 세션 정리: \(n)개 격리(백업 폴더 dedup-*)")
+    exit(0)
+}
+
 if cliArgs.contains("--release-holds") {
     let m = AccountManager()
     let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),

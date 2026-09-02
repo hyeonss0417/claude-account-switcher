@@ -155,19 +155,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         history.append(now)
         relaunchHistory[accountUuid] = history
 
-        let byUpdate = CrashWatch.wasUpdateQuit()
+        // 로그상 업데이트 종료가 아니어도, 업데이터(ShipIt)가 돌고 있으면 같은 상황이다.
+        // 여기서 5초 만에 창을 되살리면 새 프로세스가 번들을 잠가 설치가 또 실패한다
+        // (실측: 8/16~9/02 설치 실패의 마지막 원인이 바로 이 조기 재실행이었다).
+        let byUpdate = CrashWatch.wasUpdateQuit() || CrashWatch.updaterRunning()
         Log.info("자동 복구 예약: \(label) — 원인 \(byUpdate ? "자동 업데이트" : "불명")")
-        // 업데이트 설치 중이면 번들이 교체되는 중이라 조금 기다렸다 띄운다.
-        let delay: TimeInterval = byUpdate ? 20 : 5
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self else { return }
-            // 그 사이 사용자가 직접 열었으면 건너뛴다.
-            let dir = InstanceManager.dataDir(for: accountUuid).standardizedFileURL.path
-            if InstanceManager.runningDataDirs()[dir] != nil {
-                Log.info("자동 복구 생략(\(label)): 이미 실행 중")
-                return
+        if byUpdate {
+            coordinatedUpdateRestart(triggeredBy: accountUuid, label: label)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self else { return }
+                let dir = InstanceManager.dataDir(for: accountUuid).standardizedFileURL.path
+                if InstanceManager.runningDataDirs()[dir] != nil {
+                    Log.info("자동 복구 생략(\(label)): 이미 실행 중")
+                    return
+                }
+                self.syncThenLaunch(accountUuid: accountUuid, quitFirst: nil, label: "\(label) (자동 복구)")
             }
-            self.syncThenLaunch(accountUuid: accountUuid, quitFirst: nil, label: "\(label) (자동 복구)")
+        }
+    }
+
+    /// 업데이트를 **성공시키기 위한** 협조 재시작.
+    ///
+    /// 문제의 구조: 여러 인스턴스가 같은 앱 번들을 공유한다. 한 창이 업데이트하려고 꺼져도
+    /// 다른 창이 번들을 잡고 있으면 교체가 실패하고("Update didn't complete"), 우리 자동 복구가
+    /// 20초 만에 창을 되살려 업데이터를 계속 방해했다 — 실측: 8/16 이후 설치가 한 번도 성공하지
+    /// 못해 설치본과 스테이징 버전이 8단계나 벌어졌다.
+    /// 그래서 업데이트로 인한 종료가 감지되면: 남은 창도 전부 닫고 → 설치가 끝날 때까지 기다린 뒤
+    /// → 닫았던 창을 모두 되살린다.
+    private var updateRestartInProgress = false
+    private func coordinatedUpdateRestart(triggeredBy: String, label: String) {
+        guard !updateRestartInProgress else { return }
+        updateRestartInProgress = true
+        setStatus("Claude 업데이트 감지 — 모든 창을 재시작합니다")
+
+        // 1) 아직 떠 있는 창들 파악(전부 되살릴 목록) + 협조 종료
+        var accounts = Set([triggeredBy])
+        let running = InstanceManager.runningDataDirs()
+        for (dirPath, pid) in running {
+            if let a = WebSession.loggedInAccount(dataDir: URL(fileURLWithPath: dirPath)) { accounts.insert(a) }
+            CrashWatch.markIntentionalQuit(seconds: 240)
+            InstanceManager.quitAndWait(pid: pid)
+        }
+        Log.info("업데이트 협조 재시작: \(accounts.count)개 창 종료, 설치 대기")
+
+        // 2) 업데이터가 끝나기를 기다렸다가(최대 3분) 전부 되살린다
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let deadline = Date().addingTimeInterval(180)
+            Thread.sleep(forTimeInterval: 10)                       // 설치 시작 여유
+            while Date() < deadline, CrashWatch.updaterRunning() {
+                Thread.sleep(forTimeInterval: 5)
+            }
+            Thread.sleep(forTimeInterval: 3)
+            DispatchQueue.main.async {
+                self?.updateRestartInProgress = false
+                for a in accounts {
+                    self?.syncThenLaunch(accountUuid: a, quitFirst: nil, label: "업데이트 후 복구")
+                }
+                Log.info("업데이트 협조 재시작 완료: \(accounts.count)개 창 복귀")
+            }
         }
     }
 

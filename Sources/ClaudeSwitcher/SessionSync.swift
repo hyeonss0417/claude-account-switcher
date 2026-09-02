@@ -97,6 +97,69 @@ enum SessionSync {
         }
     }
 
+    /// 같은 대화(cliSessionId)를 가리키는 인덱스가 여럿이면 하나만 남긴다.
+    ///
+    /// 왜 생기나: 진행 중 세션은 Claude 가 인덱스를 늦게 쓴다. 그 사이 고아 복구가 사본을 만들고,
+    /// 종료 때 Claude 가 자기 인덱스를 마저 쓰면 **같은 세션이 목록에 두 번** 뜬다.
+    /// 우선순위: Claude 가 쓴 원본(마커 없음) > 우리 복구본. 단, 원본이 worktree 재활용으로
+    /// 가려져 있는 경우(그 worktree 의 최신 세션이 아님)에는 복구본을 남겨야 목록에 보인다.
+    @discardableResult
+    static func dedupeDuplicates(folders: [URL]) -> Int {
+        let fm = FileManager.default
+        guard let first = folders.first else { return 0 }
+        guard let items = try? fm.contentsOfDirectory(at: first, includingPropertiesForKeys: nil) else { return 0 }
+
+        struct E { let url: URL; let obj: [String: Any] }
+        var byCli: [String: [E]] = [:]
+        var newestInWorktree: [String: Double] = [:]
+        for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: item),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let cli = obj["cliSessionId"] as? String else { return }
+                byCli[cli, default: []].append(E(url: item, obj: obj))
+                if let wt = obj["worktreeName"] as? String {
+                    let ts = (obj["lastActivityAt"] as? Double) ?? 0
+                    newestInWorktree[wt] = max(newestInWorktree[wt] ?? 0, ts)
+                }
+            }
+        }
+
+        let dest = Paths.backupsDir.appending(path: "dedup-\(stamp())")
+        var removed = 0
+        for (_, entries) in byCli where entries.count > 1 {
+            let originals = entries.filter { $0.obj["recoveredBy"] == nil }
+            let recovered = entries.filter { $0.obj["recoveredBy"] != nil }
+            var toRemove: [E] = []
+            if let keep = originals.first {
+                // 원본이 가려져 있지 않으면 복구본은 전부 제거, 가려져 있으면 복구본 1개는 남긴다.
+                let shadowed: Bool = {
+                    guard let wt = keep.obj["worktreeName"] as? String,
+                          let ts = keep.obj["lastActivityAt"] as? Double else { return false }
+                    return (newestInWorktree[wt] ?? 0) > ts
+                }()
+                toRemove += originals.dropFirst().map { $0 }
+                toRemove += shadowed ? recovered.dropFirst().map { $0 } : recovered
+            } else {
+                toRemove = recovered.dropFirst().map { $0 }     // 전부 복구본이면 1개만 남김
+            }
+            for e in toRemove {
+                try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+                let name = e.url.lastPathComponent
+                // 모든 폴더에서 같은 파일명을 치운다(공유 모드에선 첫 폴더가 실체)
+                for folder in folders {
+                    let f = folder.appending(path: name)
+                    guard fm.fileExists(atPath: f.path) else { continue }
+                    let backupTarget = dest.appending(path: name)
+                    if fm.fileExists(atPath: backupTarget.path) { try? fm.removeItem(at: f) }
+                    else if (try? fm.moveItem(at: f, to: backupTarget)) != nil { removed += 1 }
+                }
+            }
+        }
+        if removed > 0 { Log.info("중복 세션 정리: \(removed)개 격리") }
+        return removed
+    }
+
     /// 이미 퍼진 죽은 인덱스를 백업으로 격리(비파괴). 반환: 격리한 개수.
     @discardableResult
     static func quarantineDeadIndexes(folders: [URL]) -> Int {

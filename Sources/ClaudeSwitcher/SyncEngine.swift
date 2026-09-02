@@ -19,6 +19,7 @@ final class SyncEngine {
         var copied = 0
         var skippedDead = 0
         var quarantined = 0
+        var deduped = 0              // 같은 대화를 두 번 가리키던 중복 인덱스 정리
         var lockHeld = 0
         var lockReleased = 0
         var orphansRecovered = 0     // 인덱스가 유실됐다 되살린 세션 수
@@ -85,6 +86,7 @@ final class SyncEngine {
                     Date().timeIntervalSince(self.lastQuarantine) > self.quarantineInterval
                 if doQuarantine {
                     result.quarantined = SessionSync.quarantineDeadIndexes(folders: f)
+                    result.deduped = SessionSync.dedupeDuplicates(folders: f)
                     self.lastQuarantine = Date()
                 }
 
