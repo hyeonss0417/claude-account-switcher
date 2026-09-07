@@ -46,6 +46,15 @@ enum SessionLock {
     @discardableResult
     static func filterForLaunch(targetFolders: [URL], otherFolders: [URL]) -> Int {
         guard !targetFolders.isEmpty, !otherFolders.isEmpty else { return 0 }
+        // 공유 모드에서는 폴더가 **하나뿐**이다. 여기서 감추면 그 창만이 아니라 모든 창에서
+        // 사라지고, 되돌리기 전에 다른 창이 뜨면 그 창은 재시작 전까지 그 세션을 영영 못 본다
+        // (실측: 4개를 3분간 뺐다가 되돌리는 사이에 뜬 창의 목록이 그만큼 어긋났다).
+        // 창마다 다른 목록을 줄 방법이 없으므로 공유 모드에서는 잠금을 걸지 않는다.
+        if LinkMode.isEnabled(folders: targetFolders + otherFolders) {
+            let back = releaseAll(folders: targetFolders + otherFolders)
+            if back > 0 { Log.info("공유 모드: 보류본 \(back)개 회수(잠금 미적용)") }
+            return 0
+        }
         let fm = FileManager.default
         let now = Date()
 
@@ -82,9 +91,9 @@ enum SessionLock {
     @discardableResult
     static func enforce(folders: [URL]) -> Status {
         var status = Status()
-        // 인스턴스가 하나뿐이면 잠글 이유가 없다(동시 사용이 아님). 보류본 회수만 수행.
+        // 공유 모드이거나 인스턴스가 하나뿐이면 잠글 이유가 없다. 보류본 회수만 수행.
         let roots = Set(folders.map(instanceRoot))
-        guard roots.count > 1 else {
+        guard roots.count > 1, !LinkMode.isEnabled(folders: folders) else {
             status.released = releaseAll(folders: folders)
             return status
         }
