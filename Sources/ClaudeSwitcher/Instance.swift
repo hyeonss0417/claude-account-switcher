@@ -273,7 +273,10 @@ enum InstanceManager {
     ///
     /// `profiles` 를 주면 **아직 없는 인스턴스 세션 폴더를 미리 만들어** 동기화 대상에 포함시킨다.
     /// (새 인스턴스는 로그인 후에야 폴더가 생겨서, 그 전 동기화에서 누락돼 목록이 빈 채로 시작한다)
-    static func allSessionFolders(knownAccounts: [String], profiles: [Profile] = []) -> [URL] {
+    /// - Parameter resolve: `true`(기본)면 링크를 실체로 해석해 중복 없이 돌려준다(읽기·쓰기용).
+    ///   `false` 면 `<acct>/<org>` 경로 그대로 돌려준다 — 링크로 바꿀 대상을 찾을 때 쓴다.
+    static func allSessionFolders(knownAccounts: [String], profiles: [Profile] = [],
+                                  resolve: Bool = true) -> [URL] {
         let fm = FileManager.default
         var roots: [URL] = [Paths.sessionsBase]
         for acct in knownAccounts {
@@ -300,7 +303,7 @@ enum InstanceManager {
                     // ⚠️ 공유 모드에서 이 경로는 심볼릭 링크다. FileManager 의 디렉터리 열거는
                     // **링크를 따라가지 않아 빈 목록을 돌려준다**(실측: 전 폴더가 0개로 보여
                     // 동기화가 조용히 무동작이 됐다). 반드시 실제 경로로 해석해서 쓴다.
-                    let real = o.resolvingSymlinksInPath()
+                    let real = resolve ? o.resolvingSymlinksInPath() : o
                     if seen.insert(real.standardizedFileURL.path).inserted { folders.append(real) }
                 }
             }

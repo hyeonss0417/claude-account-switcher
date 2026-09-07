@@ -46,8 +46,14 @@ final class AccountManager {
         return out
     }
 
+    /// 그 계정의 **창이 실제로 읽는 폴더** 기준으로 센다: 계정 인스턴스 폴더가 있으면 그것
+    /// (링크면 실체로 해석), 없으면 기본 인스턴스 폴더. 기본 폴더만 보면 새로 추가한 계정은
+    /// 세션이 멀쩡히 있어도 0 으로 표시된다.
     func sessionCount(accountUuid: String, orgUuid: String) -> Int {
-        let dir = Paths.sessionsBase.appending(path: accountUuid).appending(path: orgUuid)
+        let inst = InstanceManager.dataDir(for: accountUuid)
+            .appending(path: "claude-code-sessions").appending(path: accountUuid).appending(path: orgUuid)
+        let base = Paths.sessionsBase.appending(path: accountUuid).appending(path: orgUuid)
+        let dir = fm.fileExists(atPath: inst.path) ? inst.resolvingSymlinksInPath() : base
         guard let items = try? fm.contentsOfDirectory(atPath: dir.path) else { return 0 }
         return items.filter { $0.hasPrefix("local_") && $0.hasSuffix(".json") }.count
     }

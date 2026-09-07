@@ -55,7 +55,10 @@ final class SyncEngine {
     /// 동기화 요청. `force` 면 최소 간격을 무시한다(사용자가 직접 누른 경우).
     /// - Parameter skipWriteTo: 읽기만 하고 **쓰지 않을** 폴더(실행 중인 창). Claude 는 시작 시에만
     ///   폴더를 읽으므로, 실행 중인 창에 넣어도 안 보이고 사이드바 그룹만 잠시 쪼개진다.
+    /// - Parameter rawFolders: 링크를 해석하지 않은 `<acct>/<org>` 경로들. 공유 모드에서
+    ///   새로 생긴 실제 폴더를 링크로 흡수하는 데 쓴다(비우면 흡수하지 않는다).
     func request(folders: @escaping () -> [URL],
+                 rawFolders: @escaping () -> [URL] = { [] },
                  autoClean: Bool,
                  force: Bool = false,
                  skipWriteTo: @escaping () -> Set<String> = { [] },
@@ -79,6 +82,10 @@ final class SyncEngine {
             var result = Result()
             // 파일을 대량으로 다루는 구간은 반드시 오토릴리즈 풀로 감싼다.
             autoreleasepool {
+                // 공유 모드라면 새 계정·새 조직 폴더를 먼저 실체에 붙인다. 안 그러면 아래 복사가
+                // 그 폴더를 별도 사본으로 채워 버린다(실측: 새 계정 폴더에 429개 사본).
+                let absorbed = LinkMode.absorbNewFolders(rawFolders: rawFolders(), runningFolders: skipWriteTo())
+                if absorbed > 0 { Log.info("공유 모드: 새 폴더 \(absorbed)개 링크로 흡수") }
                 let f = folders()
                 guard f.count > 1 else { return }
 

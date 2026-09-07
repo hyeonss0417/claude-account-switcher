@@ -276,6 +276,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return all.isEmpty ? manager.discoverFolders().map(\.url) : all
     }
 
+    /// 링크를 해석하지 않은 `<acct>/<org>` 경로들 — 공유 모드에서 새 폴더를 링크로 흡수할 때 쓴다.
+    private func rawSyncFolders() -> [URL] {
+        InstanceManager.allSessionFolders(knownAccounts: manager.profiles.map(\.accountUuid),
+                                          profiles: manager.profiles, resolve: false)
+    }
+
     /// 모든 동기화는 SyncEngine 을 거친다(직렬 실행·최소 간격·자기 쓰기 무시).
     /// 지금 실행 중인 창들이 읽는 세션 폴더 — 여기엔 쓰지 않는다.
     /// Claude 는 시작할 때만 폴더를 읽으므로 넣어도 재시작 전엔 안 보이고,
@@ -293,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// - Parameter includeRunning: 그 창을 곧 재시작할 때만 true(그때는 채워 넣어야 한다).
     private func runSyncInBackground(quiet: Bool, includeRunning: Bool = false) {
         SyncEngine.shared.request(folders: { [weak self] in self?.syncFolders() ?? [] },
+                                  rawFolders: { [weak self] in self?.rawSyncFolders() ?? [] },
                                   autoClean: autoCleanDead,
                                   force: !quiet,
                                   skipWriteTo: { [weak self] in
@@ -480,7 +487,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 공유 모드가 켜져 있으면 이 창의 폴더도 링크로 바꾼다.
                 // 창이 꺼져 있는 지금이 유일하게 안전한 시점이다.
                 if LinkMode.isEnabled(folders: folders) {
-                    let target = InstanceManager.sessionFolders(of: InstanceManager.dataDir(for: accountUuid))
+                    // 해석 전 경로여야 링크로 바꿀 수 있다(sessionFolders 는 실체로 해석해 돌려준다).
+                    let target = InstanceManager.allSessionFolders(knownAccounts: [accountUuid],
+                                                                   profiles: self.manager.profiles, resolve: false)
+                        .filter { $0.path.hasPrefix(InstanceManager.dataDir(for: accountUuid).path) }
                     linked = LinkMode.enable(folders: target, runningFolders: []).linked
                 }
                 // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
@@ -609,7 +619,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func adoptNewAccounts() {
         for (acct, org) in InstanceManager.adoptPendingInstances() {
             manager.addProfileIfMissing(accountUuid: acct, organizationUuid: org)
-            setStatus("새 계정 등록됨 — \(acct.prefix(8))")
+            // 등록 즉시 공유 실체에 붙인다(창은 닫혀 있을 때만 등록되므로 지금이 안전하다).
+            let n = LinkMode.absorbNewFolders(rawFolders: rawSyncFolders(), runningFolders: foldersOfRunningWindows())
+            setStatus("새 계정 등록됨 — \(acct.prefix(8))" + (n > 0 ? " (세션 공유 연결 \(n)개)" : ""))
         }
     }
 

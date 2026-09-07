@@ -27,9 +27,17 @@ enum LinkMode {
         (try? FileManager.default.destinationOfSymbolicLink(atPath: folder.path)) != nil
     }
 
-    /// 지금 공유 모드인지(대상 폴더가 하나라도 링크면 켜진 것으로 본다).
+    /// 이 경로가 실체 그 자체인가(링크를 해석한 결과로 넘어온 경우).
+    static func isCanonical(_ folder: URL) -> Bool {
+        folder.standardizedFileURL.path == canonical.standardizedFileURL.path
+    }
+
+    /// 지금 공유 모드인지.
+    /// 동기화 대상 폴더는 링크를 **해석한 경로**로 넘어오는 경우가 많다(그래야 열거가 된다).
+    /// 그 경우 링크 여부만 보면 전부 꺼진 것으로 오판해, 새 계정 폴더를 링크하지 않고
+    /// 사본을 쌓는 사고가 났다 — 실체 경로가 섞여 있어도 켜진 것으로 본다.
     static func isEnabled(folders: [URL]) -> Bool {
-        folders.contains { isLinked($0) }
+        folders.contains { isLinked($0) || isCanonical($0) }
     }
 
     /// 공유 모드로 전환. **실행 중인 창의 폴더는 건드리지 않는다**(그 창을 닫은 뒤 다시 실행할 것).
@@ -42,7 +50,7 @@ enum LinkMode {
         // 1) 모든 폴더의 인덱스를 실체로 모은다. 같은 이름이 여러 벌이면 **가장 최근 것**을 남긴다
         //    (아카이브처럼 갈라진 상태를 최신 기준으로 수렴시킨다).
         for folder in folders {
-            guard !isLinked(folder) else { continue }
+            guard !isLinked(folder), !isCanonical(folder) else { continue }
             guard let items = try? fm.contentsOfDirectory(at: folder,
                                                           includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
             for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
@@ -67,7 +75,8 @@ enum LinkMode {
         // 2) 각 폴더를 실체로 향하는 링크로 교체(원본은 백업으로 보관)
         let backup = Paths.backupsDir.appending(path: "prelink-\(stamp())")
         for folder in folders {
-            if isLinked(folder) { continue }
+            // 실체 자신을 링크로 바꾸면 자기 자신을 가리키는 고리가 돼 전부 사라진다.
+            if isLinked(folder) || isCanonical(folder) { continue }
             if runningFolders.contains(folder.standardizedFileURL.path) {
                 report.skippedRunning.append(folder.lastPathComponent)
                 continue
@@ -89,6 +98,23 @@ enum LinkMode {
         }
         Log.info("공유 모드: 링크 \(report.linked)개, 통합 \(report.merged)개, 충돌 정리 \(report.conflictsResolved)개")
         return report
+    }
+
+    /// 공유 모드가 켜져 있을 때, **아직 링크가 아닌** 폴더를 찾아 링크로 흡수한다.
+    ///
+    /// 새 계정을 등록하거나 Claude 가 스스로 `<acct>/<org>` 폴더를 새로 만들면 그 폴더는 실체와
+    /// 무관한 별도 사본이 된다. 그대로 두면 동기화가 거기에 수백 개를 복사하고, 그 창에서 한
+    /// 아카이브·삭제는 다른 창에 전파되지 않는다. 실행 중인 창의 폴더는 건드리지 않는다.
+    /// - Returns: 새로 링크한 폴더 수(모두 링크면 0 — 사실상 비용이 없다).
+    @discardableResult
+    static func absorbNewFolders(rawFolders: [URL], runningFolders: Set<String>) -> Int {
+        guard isEnabled(folders: rawFolders) else { return 0 }
+        let pending = rawFolders.filter {
+            !isLinked($0) && !isCanonical($0) && !runningFolders.contains($0.standardizedFileURL.path)
+        }
+        guard !pending.isEmpty else { return 0 }
+        let r = enable(folders: pending, runningFolders: runningFolders)
+        return r.linked
     }
 
     /// 공유 모드 해제 — 링크를 실제 폴더로 되돌린다(실체 내용을 각 폴더에 복사).
