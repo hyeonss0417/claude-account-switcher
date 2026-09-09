@@ -151,6 +151,7 @@ struct SessionIndex {
         cacheLock.unlock()
 
         var out: [String: URL] = [:]
+        var sizes: [String: Int] = [:]
         autoreleasepool {
             let fm = FileManager.default
             guard let projects = try? fm.contentsOfDirectory(at: Paths.projectsDir, includingPropertiesForKeys: nil) else { return }
@@ -161,7 +162,12 @@ struct SessionIndex {
                     for f in files where f.pathExtension == "jsonl" {
                         let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
                         guard size > 0 else { continue }
-                        out[f.deletingPathExtension().lastPathComponent] = f
+                        // 같은 세션 id 의 로그가 여러 폴더에 있으면(worktree 이름 변경 뒤 옛 폴더에 남는
+                        // 메타데이터 전용 짧은 로그) **본문이 있는 큰 쪽**을 쓴다.
+                        let sid = f.deletingPathExtension().lastPathComponent
+                        if let prev = sizes[sid], prev >= size { continue }
+                        sizes[sid] = size
+                        out[sid] = f
                     }
                 }
             }

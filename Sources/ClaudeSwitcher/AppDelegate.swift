@@ -255,20 +255,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private var busyCountCache = 0
-    private var busyCountAt = Date.distantPast
-
-    /// 진행 중 세션 수(30초 캐시). 인스턴스가 하나면 잠금이 없으므로 항상 0.
-    private func cachedBusyCount() -> Int {
-        if Date().timeIntervalSince(busyCountAt) < 30 { return busyCountCache }
-        let folders = syncFolders()
-        let value = Set(folders.map(SessionLock.instanceRoot)).count > 1
-            ? SessionLock.busyCount(folders: folders) : 0
-        busyCountCache = value
-        busyCountAt = Date()
-        return value
-    }
-
     /// 동기화 대상 = 기본 인스턴스 + 계정별 인스턴스의 모든 세션 폴더.
     private func syncFolders() -> [URL] {
         let accounts = manager.profiles.map(\.accountUuid)
@@ -276,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return all.isEmpty ? manager.discoverFolders().map(\.url) : all
     }
 
-    /// 링크를 해석하지 않은 `<acct>/<org>` 경로들 — 공유 모드에서 새 폴더를 링크로 흡수할 때 쓴다.
+    /// 링크를 해석하지 않은 `<acct>/<org>` 경로들 — 링크로 남은 폴더를 되돌릴 때 쓴다.
     private func rawSyncFolders() -> [URL] {
         InstanceManager.allSessionFolders(knownAccounts: manager.profiles.map(\.accountUuid),
                                           profiles: manager.profiles, resolve: false)
@@ -300,6 +286,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func runSyncInBackground(quiet: Bool, includeRunning: Bool = false) {
         SyncEngine.shared.request(folders: { [weak self] in self?.syncFolders() ?? [] },
                                   rawFolders: { [weak self] in self?.rawSyncFolders() ?? [] },
+                                  keepFolders: { [weak self] in
+                                      LinkMode.foldersInUse(profiles: self?.manager.profiles ?? [])
+                                  },
                                   autoClean: autoCleanDead,
                                   force: !quiet,
                                   skipWriteTo: { [weak self] in
@@ -309,14 +298,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if r.orphansRecovered > 0 {
                 Log.info("고아 세션 복구: \(r.orphansRecovered)개 (비정상 종료로 인덱스 유실)")
             }
-            if r.copied > 0 || r.quarantined > 0 {
-                Log.info("동기화: 복사 \(r.copied), 격리 \(r.quarantined), 잠금 \(r.lockHeld)")
+            if r.copied > 0 || r.updated > 0 || r.quarantined > 0 {
+                Log.info("동기화: 복사 \(r.copied), 갱신 \(r.updated), 격리 \(r.quarantined)")
             }
             DispatchQueue.main.async {
                 if !quiet {
-                    var msg = "동기화 완료 — \(r.copied)개 통합"
+                    var msg = "동기화 완료 — \(r.copied)개 통합, \(r.updated)개 갱신"
                     if r.quarantined > 0 { msg += ", 빈 세션 \(r.quarantined)개 정리" }
-                    if r.lockHeld > 0 || r.lockReleased > 0 { msg += " · 잠금 \(r.lockHeld)/해제 \(r.lockReleased)" }
+                    if r.foldersRestored > 0 { msg += " · 링크 폴더 \(r.foldersRestored)개 복원" }
                     if r.deferredRunning > 0 { msg += " · 실행 중 창 \(r.deferredRunning)건은 재시작 시" }
                     self?.setStatus(msg)
                 }
@@ -412,15 +401,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.state = isUp ? .on : .off
             menu.addItem(item)
         }
-        // 메뉴를 열 때마다 전 인덱스를 다시 읽으면 비싸다 → 짧게 캐시하고,
-        // 인스턴스가 2개 이상일 때(=잠금이 의미 있을 때)만 계산한다.
-        let busy = cachedBusyCount()
-        if busy > 0 {
-            let info = NSMenuItem(title: "  진행 중 \(busy)개 — 다른 창에서는 숨김", action: nil, keyEquivalent: "")
-            info.isEnabled = false
-            menu.addItem(info)
-        }
-
         addItem(to: menu, "＋ 새 계정 추가…", #selector(addAccount))
         menu.addItem(.separator())
         addItem(to: menu, "지금 세션 동기화", #selector(syncNow), key: "s")
@@ -434,8 +414,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clean.state = autoCleanDead ? .on : .off
         let reopen = addItem(to: menu, "창이 닫히면 자동으로 다시 열기", #selector(toggleAutoReopen))
         reopen.state = autoReopen ? .on : .off
-        let share = addItem(to: menu, "세션 폴더 공유(아카이브까지 반영)", #selector(toggleLinkMode))
-        share.state = LinkMode.isEnabled(folders: syncFolders()) ? .on : .off
         menu.addItem(.separator())
         addItem(to: menu, "현재 로그인 저장(전환 대상 등록)", #selector(captureNow))
         addItem(to: menu, "빈 세션 정리(죽은 인덱스 격리)", #selector(cleanDead))
@@ -473,10 +451,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let folders = syncFolders()
         DispatchQueue.global(qos: .userInitiated).async {
             var copied = 0
-            var lockedOut = 0
-            var linked = 0
+            var updated = 0
             var revived = 0
             autoreleasepool {
+                // 이 창의 폴더가 링크로 남아 있으면 실제 폴더로 되돌린다(링크에는 저장이 안 된다).
+                LinkMode.restoreRealFolders(rawFolders: self.rawSyncFolders(),
+                                            keep: LinkMode.foldersInUse(profiles: self.manager.profiles))
                 // 창을 띄우기 **직전에** 인덱스가 유실된 세션을 되살린다.
                 // Claude 는 세션 인덱스를 곧바로 쓰지 않는 경우가 있어, 방금 만든 세션이
                 // 인덱스 없이 남아 있을 수 있다. 주기 복구(30분)를 기다리면 그 사이 재시작한
@@ -484,28 +464,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let orphans = OrphanSessions.find(folders: folders)
                 if !orphans.isEmpty { revived = OrphanSessions.recover(orphans, into: folders) }
                 SessionSync.dedupeDuplicates(folders: folders)   // 복구가 만든 중복은 창이 뜨기 전에 정리
-                // 공유 모드가 켜져 있으면 이 창의 폴더도 링크로 바꾼다.
-                // 창이 꺼져 있는 지금이 유일하게 안전한 시점이다.
-                if LinkMode.isEnabled(folders: folders) {
-                    // 해석 전 경로여야 링크로 바꿀 수 있다(sessionFolders 는 실체로 해석해 돌려준다).
-                    let target = InstanceManager.allSessionFolders(knownAccounts: [accountUuid],
-                                                                   profiles: self.manager.profiles, resolve: false)
-                        .filter { $0.path.hasPrefix(InstanceManager.dataDir(for: accountUuid).path) }
-                    linked = LinkMode.enable(folders: target, runningFolders: []).linked
-                }
                 // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
-                copied = SessionSync.syncAll(folders: folders).copied
-                // 그런 다음, 다른 창에서 **지금 진행 중**인 세션은 이 창에서 빼둔다.
-                // 창이 꺼져 있는 이 순간이 잠금이 실제로 효력을 갖는 유일한 시점이다.
-                let target = InstanceManager.sessionFolders(of: InstanceManager.dataDir(for: accountUuid))
-                let others = folders.filter { !target.contains($0) }
-                lockedOut = SessionLock.filterForLaunch(targetFolders: target, otherFolders: others)
+                let r = SessionSync.syncAll(folders: self.syncFolders())   // 폴더 복원 뒤 다시 계산
+                copied = r.copied; updated = r.updated
             }
             SessionIndex.flushCaches()
             DispatchQueue.main.async { [weak self] in
                 InstanceManager.launch(accountUuid: accountUuid)
-                var msg = "\(label) 실행 — 세션 \(copied)개 반영"
-                if lockedOut > 0 { msg += ", 다른 창 진행 중 \(lockedOut)개 제외" }
+                var msg = "\(label) 실행 — 세션 \(copied)개 반영, \(updated)개 갱신"
+                if revived > 0 { msg += ", 유실 \(revived)개 복구" }
                 self?.setStatus(msg)
                 self?.populateMenu()
             }
@@ -619,45 +586,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func adoptNewAccounts() {
         for (acct, org) in InstanceManager.adoptPendingInstances() {
             manager.addProfileIfMissing(accountUuid: acct, organizationUuid: org)
-            // 등록 즉시 공유 실체에 붙인다(창은 닫혀 있을 때만 등록되므로 지금이 안전하다).
-            let n = LinkMode.absorbNewFolders(rawFolders: rawSyncFolders(), runningFolders: foldersOfRunningWindows())
-            setStatus("새 계정 등록됨 — \(acct.prefix(8))" + (n > 0 ? " (세션 공유 연결 \(n)개)" : ""))
+            setStatus("새 계정 등록됨 — \(acct.prefix(8))")
+            runSyncInBackground(quiet: true)          // 새 계정 폴더를 곧바로 채운다
         }
     }
 
     @objc private func syncNow() { runSyncInBackground(quiet: false) }
-    /// 공유 모드 토글.
-    ///
-    /// 켜면 모든 계정 폴더가 **하나의 실체**를 가리켜 사본 자체가 사라진다.
-    /// 복사 방식에서는 "없는 파일만 채우기"라 아카이브 같은 **상태 변경이 전파되지 않았다**
-    /// (실측: 512개 중 209개가 아카이브 상태 불일치). 공유하면 애초에 갈라질 수가 없다.
-    @objc private func toggleLinkMode() {
-        let folders = syncFolders()
-        let on = LinkMode.isEnabled(folders: folders)
-        let running = foldersOfRunningWindows()
-        let alert = NSAlert()
-        alert.messageText = on ? "세션 폴더 공유를 끌까요?" : "세션 폴더를 공유할까요?"
-        alert.informativeText = on
-            ? "각 계정이 자기 사본을 갖는 예전 방식으로 돌아갑니다. 아카이브 같은 상태 변경은 다시 갈라질 수 있습니다."
-            : "모든 계정이 같은 세션 폴더를 보게 됩니다.\n"
-              + "한 창에서 아카이브하면 다른 창에도 반영되고(표시는 그 창 재시작 시), 사본이 없어 대량 복사도 사라집니다.\n"
-              + "실행 중인 창은 다음 재시작 때 자동 전환됩니다. 원본은 백업에 보관합니다."
-        alert.addButton(withTitle: on ? "끄기" : "켜기")
-        alert.addButton(withTitle: "취소")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        if on {
-            let n = LinkMode.disable(folders: folders, runningFolders: running)
-            setStatus("공유 모드 해제 — \(n)개 폴더 복원")
-        } else {
-            let r = LinkMode.enable(folders: folders, runningFolders: running)
-            var msg = "공유 모드 — 링크 \(r.linked)개, 상태 정리 \(r.conflictsResolved)개"
-            if !r.skippedRunning.isEmpty { msg += " (실행 중 \(r.skippedRunning.count)개는 재시작 때)" }
-            setStatus(msg)
-        }
-        populateMenu()
-    }
-
     @objc private func toggleAutoReopen() {
         autoReopen.toggle()
         setStatus("자동 다시 열기: \(autoReopen ? "켜짐" : "꺼짐")")

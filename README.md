@@ -30,10 +30,11 @@ When you switch to another account, its folder is empty — so **all your sessio
 - **Dock icon** (on by default) — click it to pop the menu open at your cursor, for when the menu bar is too crowded to hit the status icon. Turn it off to go menu-bar-only.
 - **Stable code signing** (`setup-signing.sh`) — so macOS's Keychain "Always Allow" actually sticks instead of re-prompting on every switch.
 - **Un-shadow recycled-worktree sessions** — Claude Code reuses worktree directories, and the desktop list only shows the newest session per worktree, so older ones silently disappear from the list even though their logs are intact. "가려진 세션 복구" copies those logs back under the main repo and re-lists them as "… (복구)", leaving the originals untouched.
-- **Run several accounts at once** — each account gets its own Electron `--user-data-dir`, so multiple Claude Desktop windows run side by side with independent logins. Sessions are union-synced across every instance, so work started under one account continues under another.
-- **Concurrency lock** — a session whose log is actively being written is hidden from *other* instances until the turn goes quiet, so the same conversation is never appended to from two places. Held indexes are moved aside, never deleted, and restored automatically.
+- **Run several accounts at once** — each account gets its own Electron `--user-data-dir`, so multiple Claude Desktop windows run side by side with independent logins. Sessions are synced across every instance **newest-copy-wins**, so work started under one account continues under another, and an archive or rename made in one window reaches the others (they pick it up on their next launch — Claude Desktop only reads the session folder at startup).
+- **Lost-session recovery** — when Claude quits without writing a session's index, the conversation log is still there; the app rebuilds the index from it, taking the title from the log's last `custom-title` entry (Claude ≥ 1.49 records titles there). Logs written in the last 10 minutes are left alone: the window that owns them will write its own index.
+- **No symlinks, no lock** — earlier versions shared one folder through symlinks and hid in-progress sessions from other windows. Claude Desktop 1.49585.0 (2026-09-08) refuses to save into a symlinked session folder (`Failed to save session …: ENOTDIR`), and the hide-lock could not actually prevent double-opening because Claude reads the folder only at launch. Both were removed; leftover symlinks are converted back to real folders automatically (or with `--unlink`).
 - **Bounded memory** — sync is single-flight with a minimum interval, ignores the file events its own writes produce, wraps per-file work in autorelease pools, and caches parsed indexes by mtime. `--stress N` re-verifies there is no growth.
-- **Headless modes** for debugging: `--diagnose`, `--sync`, `--instances`, `--enforce-lock`, `--find-shadowed`, `--unshadow`, `--clean-dead`, `--stress`.
+- **Headless modes** for debugging: `--diagnose`, `--sync`, `--instances`, `--find-orphans`/`--recover-orphans`, `--retitle`, `--unlink`, `--dedupe`, `--find-shadowed`/`--unshadow`, `--clean-dead`, `--stress`.
 
 ## How it works
 
@@ -155,10 +156,11 @@ Claude 데스크탑은 Claude Code **세션 목록을 계정별 폴더**에 저�
 - **Dock 아이콘**(기본 켜짐) — 메뉴바가 꽉 차 상태 아이콘을 누르기 어려울 때, Dock 아이콘을 클릭하면 **마우스 위치에 메뉴가 바로 뜬다.** 끄면 메뉴바 전용으로 동작.
 - **고정 코드서명**(`setup-signing.sh`) — Keychain "항상 허용"이 재빌드 후에도 유지되어 전환할 때마다 암호를 묻지 않는다.
 - **가려진 세션 복구** — Claude Code 는 worktree 디렉터리를 재활용하는데, 데스크탑 목록은 **worktree 당 최신 세션 하나만** 보여준다. 그래서 로그가 멀쩡한데도 예전 세션이 목록에서 조용히 사라진다(동기화 문제가 아니다). 「가려진 세션 복구」가 그 로그를 본체 저장소 폴더로 복사해 「… (복구)」 항목으로 다시 띄운다. 원본은 그대로 둔다.
-- **여러 계정 동시 사용** — 계정마다 Electron `--user-data-dir` 을 따로 줘서 **여러 Claude 창을 각각 다른 계정으로 동시에** 띄운다. 세션은 모든 인스턴스에 합집합 동기화되므로 A 계정에서 하던 작업을 B 계정에서 이어갈 수 있다.
-- **동시성 잠금** — 로그가 실제로 쓰이고 있는(=턴이 도는) 세션은 **다른 인스턴스에서 감춘다.** 같은 대화에 양쪽이 append 하는 사고를 막는다. 감춘 인덱스는 삭제하지 않고 보류했다가 조용해지면 되돌린다.
+- **여러 계정 동시 사용** — 계정마다 Electron `--user-data-dir` 을 따로 줘서 **여러 Claude 창을 각각 다른 계정으로 동시에** 띄운다. 세션은 모든 인스턴스에 **최신본 우선**으로 동기화되므로 A 계정에서 하던 작업을 B 계정에서 이어갈 수 있고, 한 창에서 아카이브하거나 제목을 바꾸면 다른 창에도 반영된다(그 창의 다음 실행 때 — Claude 데스크탑은 세션 폴더를 시작할 때만 읽는다).
+- **유실 세션 복구** — Claude 가 인덱스를 쓰지 못한 채 꺼져도 대화 로그는 남는다. 앱이 로그에서 인덱스를 다시 만들며, 제목은 로그의 마지막 `custom-title` 항목에서 가져온다(Claude 1.49+ 는 제목을 로그에 기록한다). 최근 10분 안에 쓰인 로그는 건드리지 않는다 — 그 세션을 쥔 창이 곧 자기 인덱스를 쓴다.
+- **링크·잠금 없음** — 예전 버전은 심볼릭 링크로 폴더 하나를 공유하고, 진행 중인 세션을 다른 창에서 감췄다. Claude 데스크탑 1.49585.0(2026-09-08)부터 링크된 세션 폴더에는 저장을 거부하고(`Failed to save session …: ENOTDIR`), 감춤 잠금은 Claude 가 폴더를 시작할 때만 읽기 때문에 이중 열기를 실제로 막지 못했다. 둘 다 제거했고, 남아 있는 링크는 자동으로(또는 `--unlink`) 실제 폴더로 되돌린다.
 - **메모리 상한** — 동기화는 단일 실행 + 최소 간격이며, **자기 쓰기로 발생한 파일 이벤트를 무시**하고(과거 피드백 루프의 원인), 파일 단위 오토릴리즈 풀과 mtime 기반 파싱 캐시를 쓴다. `--stress N` 으로 증가 없음을 재확인할 수 있다.
-- **헤드리스 디버그 모드**: `--diagnose`, `--sync`, `--instances`, `--enforce-lock`, `--find-shadowed`, `--unshadow`, `--clean-dead`, `--stress`.
+- **헤드리스 디버그 모드**: `--diagnose`, `--sync`, `--instances`, `--find-orphans`/`--recover-orphans`, `--retitle`, `--unlink`, `--dedupe`, `--find-shadowed`/`--unshadow`, `--clean-dead`, `--stress`.
 
 ### 동작 원리
 

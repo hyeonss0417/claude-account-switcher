@@ -72,7 +72,6 @@ if cliArgs.contains("--instances") {
     }
     let folders = InstanceManager.allSessionFolders(knownAccounts: accounts)
     print("\n동기화 대상 세션 폴더: \(folders.count)개")
-    print("진행 중(잠금 대상) 세션: \(SessionLock.busyCount(folders: folders))개")
     exit(0)
 }
 
@@ -85,39 +84,24 @@ if cliArgs.contains("--dedupe") {
     exit(0)
 }
 
-if cliArgs.contains("--release-holds") {
+/// 링크로 남은 세션 폴더를 실제 폴더로 되돌린다(Claude 1.49+ 는 링크 아래에 저장하지 못한다).
+if cliArgs.contains("--unlink") {
     let m = AccountManager()
-    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
-                                                    profiles: m.profiles)
-    let n = SessionLock.releaseAll(folders: folders)
-    print("보류본 회수: \(n)개")
-    let r = SessionSync.syncAll(folders: folders)
-    print("재동기화: 복사 \(r.copied)개")
+    let raw = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                profiles: m.profiles, resolve: false)
+    let n = LinkMode.restoreRealFolders(rawFolders: raw, keep: LinkMode.foldersInUse(profiles: m.profiles))
+    print("링크 → 실제 폴더 복원: \(n)개")
+    let r = SessionSync.syncAll(folders: InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
+                                                                          profiles: m.profiles))
+    print("동기화: 복사 \(r.copied), 갱신 \(r.updated)")
     exit(0)
 }
 
-if cliArgs.contains("--link-mode") || cliArgs.contains("--unlink-mode") {
+/// 복구 인덱스의 제목을 로그의 마지막 custom-title 로 바로잡는다.
+if cliArgs.contains("--retitle") {
     let m = AccountManager()
-    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),
-                                                    profiles: m.profiles)
-    var running = Set<String>()
-    for (dirPath, _) in InstanceManager.runningDataDirs() {
-        for f in InstanceManager.sessionFolders(of: URL(fileURLWithPath: dirPath)) {
-            running.insert(f.standardizedFileURL.path)
-        }
-    }
-    if cliArgs.contains("--unlink-mode") {
-        print("공유 모드 해제: \(LinkMode.disable(folders: folders, runningFolders: running))개 폴더 복원")
-    } else {
-        let r = LinkMode.enable(folders: folders, runningFolders: running)
-        print("공유 모드 전환")
-        print("  링크로 교체: \(r.linked)개 폴더")
-        print("  실체로 통합: \(r.merged)개 세션")
-        print("  갈라진 상태 최신본으로 정리: \(r.conflictsResolved)개")
-        if !r.skippedRunning.isEmpty {
-            print("  ⚠ 실행 중이라 건너뜀: \(r.skippedRunning.count)개 — 그 창을 닫고 다시 실행하세요")
-        }
-    }
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid), profiles: m.profiles)
+    print("제목 정정: \(OrphanSessions.retitleRecovered(folders: folders))개")
     exit(0)
 }
 
@@ -136,14 +120,6 @@ if cliArgs.contains("--find-orphans") || cliArgs.contains("--recover-orphans") {
     } else if !found.isEmpty {
         print("\n복구하려면: --recover-orphans")
     }
-    exit(0)
-}
-
-if cliArgs.contains("--enforce-lock") {
-    let m = AccountManager()
-    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid))
-    let s = SessionLock.enforce(folders: folders)
-    print("잠금 적용: 감춤 \(s.busyHeld)개 / 해제 \(s.released)개")
     exit(0)
 }
 
@@ -168,9 +144,6 @@ if cliArgs.contains("--stress") {
     for i in 1...n {
         autoreleasepool {
             _ = SessionSync.syncAll(folders: folders)
-            if Set(folders.map(SessionLock.instanceRoot)).count > 1 {
-                _ = SessionLock.enforce(folders: folders)
-            }
         }
         if i % 5 == 0 { print("  \(i)회차 RSS \(String(format: "%.1f", rssMB())) MB") }
     }

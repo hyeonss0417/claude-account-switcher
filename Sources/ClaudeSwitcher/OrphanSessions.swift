@@ -6,10 +6,16 @@ import Foundation
 /// 멀쩡히 남아 있어도 목록에서 완전히 사라진다(실측: 진짜 사용자 세션 29개가 이렇게 묻혀 있었다).
 ///
 /// 다행히 로그(jsonl) 자체가 복원에 필요한 값을 들고 있다:
-///  - `aiTitle`   — 세션 제목
+///  - `{"type":"custom-title","customTitle":…}` — 제목. Claude 1.49+ 는 제목을 로그에 기록한다.
+///    처음엔 worktree 이름을, 자동 제목이나 사용자의 이름 변경이 있을 때마다 새 줄을 덧붙이므로
+///    **마지막 것**이 현재 제목이다(첫 것을 쓰면 `nice-gould-20ac2c` 같은 이름이 제목이 된다).
+///  - `aiTitle`   — 옛 형식의 제목
 ///  - `cwd`       — 작업 디렉터리(로그 위치를 결정하는 값)
 ///  - `gitBranch` — 브랜치
 /// 이 값들로 인덱스를 다시 만들면 목록에 그대로 돌아온다.
+///
+/// 단, **방금까지 쓰이던 로그는 건드리지 않는다.** 그 세션을 쥔 창이 곧 자기 인덱스를 쓴다 —
+/// 먼저 만들면 같은 세션이 두 번 뜨고, 우리 제목이 그 창의 제목을 가린다.
 enum OrphanSessions {
 
     struct Found {
@@ -35,10 +41,14 @@ enum OrphanSessions {
         return out
     }
 
-    /// 인덱스 없는 로그를 찾는다. `minBytes` 미만(빈 껍데기)과 서브에이전트 로그는 제외.
+    /// 이 시간 안에 쓰인 로그는 아직 어느 창이 쥐고 있는 것으로 보고 복구하지 않는다.
+    static let liveWindow: TimeInterval = 10 * 60
+
+    /// 인덱스 없는 로그를 찾는다. `minBytes` 미만(빈 껍데기)과 서브에이전트 로그, 진행 중 로그는 제외.
     static func find(folders: [URL], minBytes: Int = 20 * 1024) -> [Found] {
         let fm = FileManager.default
         let indexed = indexedSessionIds(folders: folders)
+        let now = Date()
         var out: [Found] = []
         guard let projects = try? fm.contentsOfDirectory(at: Paths.projectsDir, includingPropertiesForKeys: nil) else { return out }
 
@@ -50,6 +60,7 @@ enum OrphanSessions {
                     let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
                     guard size >= minBytes, !indexed.contains(sid) else { return }
                     guard let info = probe(f) else { return }
+                    if now.timeIntervalSince1970 * 1000 - info.last < liveWindow * 1000 { return }   // 진행 중
                     out.append(Found(sessionId: sid, logURL: f, title: info.title, cwd: info.cwd,
                                      branch: info.branch, firstSeen: info.first, lastSeen: info.last, bytes: size))
                 }
@@ -66,7 +77,8 @@ enum OrphanSessions {
         guard let head = try? handle.read(upToCount: 512 * 1024), !head.isEmpty else { return nil }
         let text = String(decoding: head, as: UTF8.self)
 
-        var title = SessionIndex.scanString(text, key: "aiTitle") ?? SessionIndex.scanString(text, key: "userTitle") ?? ""
+        var title = lastCustomTitle(in: url)
+            ?? SessionIndex.scanString(text, key: "aiTitle") ?? SessionIndex.scanString(text, key: "userTitle") ?? ""
         let cwd = SessionIndex.scanString(text, key: "cwd") ?? ""
         let branch = SessionIndex.scanString(text, key: "gitBranch") ?? ""
         guard !cwd.isEmpty else { return nil }
@@ -83,6 +95,69 @@ enum OrphanSessions {
         }
         let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
         return (title, cwd, branch, first, mtime.timeIntervalSince1970 * 1000)
+    }
+
+    /// worktree 가 이름을 바꾸면(relocated) 옛 폴더에 메타데이터만 남은 짧은 로그가, 새 폴더에 본문이 남는다.
+    /// 기대 경로 하나만 보면 제목을 못 찾으므로 후보를 모두 보되 큰 파일부터 본다.
+    static func lastCustomTitle(sessionId: String, expected: URL?, logIndex: [String: URL]) -> String? {
+        let fm = FileManager.default
+        var cands: [URL] = []
+        if let e = expected, fm.fileExists(atPath: e.path) { cands.append(e) }
+        if let i = logIndex[sessionId], !cands.contains(i) { cands.append(i) }
+        let size: (URL) -> Int = { (try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0 }
+        for c in cands.sorted(by: { size($0) > size($1) }) {
+            if let t = lastCustomTitle(in: c) { return t }
+        }
+        return nil
+    }
+
+    /// 로그에 기록된 **마지막** `custom-title` 값. 100MB 짜리 로그도 있으므로 메모리 맵으로 뒤에서부터 찾는다.
+    static func lastCustomTitle(in log: URL) -> String? {
+        guard let data = try? Data(contentsOf: log, options: .mappedIfSafe) else { return nil }
+        guard let r = data.range(of: Data("\"customTitle\":\"".utf8), options: .backwards) else { return nil }
+        var bytes: [UInt8] = []
+        var i = r.upperBound
+        while i < data.count, bytes.count < 400 {
+            let b = data[i]
+            if b == UInt8(ascii: "\\"), i + 1 < data.count {      // \" \\ 정도만 풀어준다
+                bytes.append(data[i + 1]); i += 2; continue
+            }
+            if b == UInt8(ascii: "\"") { break }
+            bytes.append(b); i += 1
+        }
+        let s = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
+    }
+
+    /// 우리가 복구한 인덱스의 제목을 로그의 마지막 custom-title 로 바로잡는다.
+    /// (예전 복구본은 worktree 이름을 제목으로 달고 `titleSource: user` 라 Claude 도 안 고쳐 준다)
+    /// - Returns: 고친 파일 수(모든 폴더의 사본 포함).
+    @discardableResult
+    static func retitleRecovered(folders: [URL]) -> Int {
+        let fm = FileManager.default
+        let logIndex = SessionIndex.buildLogIndex()
+        var fixed = 0
+        for folder in folders {
+            guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
+            for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+                autoreleasepool {
+                    guard let data = try? Data(contentsOf: item),
+                          var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          obj["recoveredBy"] != nil,
+                          let idx = SessionIndex.load(item) else { return }
+                    guard let sid = idx.sessionId,
+                          let title = lastCustomTitle(sessionId: sid, expected: idx.logURL, logIndex: logIndex),
+                          title != (obj["title"] as? String) else { return }
+                    obj["title"] = title
+                    obj["titleSource"] = "auto"
+                    guard let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+                          (try? out.write(to: item, options: .atomic)) != nil else { return }
+                    fixed += 1
+                }
+            }
+        }
+        if fixed > 0 { Log.info("복구 인덱스 제목 정정: \(fixed)개") }
+        return fixed
     }
 
     /// 인덱스를 다시 만들어 목록에 되돌린다. 기존 인덱스 하나를 **스키마 본**으로 삼아 형식을 맞춘다.
@@ -113,7 +188,7 @@ enum OrphanSessions {
             obj["cwd"] = item.cwd
             obj["originCwd"] = origin
             obj["title"] = item.title
-            obj["titleSource"] = "user"
+            obj["titleSource"] = "auto"      // Claude 가 나중에 더 나은 제목으로 바꿀 수 있게
             obj["recoveredBy"] = "orphan"   // 중복 정리 때 우리 사본임을 식별
             obj["branch"] = item.branch
             obj["isArchived"] = false

@@ -2,13 +2,18 @@ import Foundation
 
 struct SyncReport {
     var copied = 0
+    var updated = 0          // 이미 있었지만 더 최신본으로 갈아끼운 수(아카이브·제목 변경 전파)
     var skippedDead = 0      // 대화 로그가 없는 "죽은 인덱스" — 복사하면 빈 세션으로 보인다
     var skippedBusy = 0      // 쓰는 중인 파일
     var deferredRunning = 0  // 실행 중인 창이라 나중(종료/재실행 시)으로 미룬 복사
     var failed = 0
 }
 
-/// 모든 계정/조직 폴더의 local_*.json 을 합집합(union)으로 맞춘다.
+/// 모든 계정/조직 폴더의 local_*.json 을 **최신본 기준으로** 맞춘다.
+///
+/// 없는 파일은 채우고, 같은 파일이 여러 폴더에 있으면 mtime 이 가장 최근인 것으로 나머지를 갈아끼운다.
+/// 그래서 한 창에서 아카이브하거나 제목을 바꾸면 다른 창에도(그 창의 다음 재시작 때) 반영된다.
+/// 복사본의 mtime 은 원본과 같게 맞춘다 — 안 그러면 사본이 '최신'이 되어 매 사이클 서로를 덮어쓴다.
 ///
 /// 세션 인덱스에는 계정 UUID 가 박혀있지 않고(검증됨), 실제 대화 로그는 `~/.claude/projects` 에
 /// 계정 무관 공유되므로 폴더 간 복사는 안전하다. → 어느 계정으로 로그인하든 같은 세션 목록이 보인다.
@@ -33,18 +38,18 @@ enum SessionSync {
 
         struct Best { var index: SessionIndex }
         var best: [String: Best] = [:]
-        var perFolder: [URL: Set<String>] = [:]
+        var perFolder: [URL: [String: Date]] = [:]     // 파일명 → 그 폴더 사본의 mtime
 
         // 파일을 대량으로 읽는 구간 — 오토릴리즈 객체가 쌓이지 않도록 폴더 단위로 풀을 감싼다.
         for folder in folders {
             autoreleasepool {
-                var names = Set<String>()
+                var names: [String: Date] = [:]
                 if let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]) {
                     for item in items {
                         let name = item.lastPathComponent
                         guard name.hasPrefix("local_"), name.hasSuffix(".json") else { continue }
-                        names.insert(name)
                         guard let idx = SessionIndex.load(item) else { report.failed += 1; continue }
+                        names[name] = idx.modified
                         if let e = best[name] { if idx.modified > e.index.modified { best[name] = Best(index: idx) } }
                         else { best[name] = Best(index: idx) }
                     }
@@ -62,11 +67,16 @@ enum SessionSync {
             let alive = b.index.hasLiveLog || b.index.locateLogAnywhere(index: logIndex) != nil
             guard alive else { report.skippedDead += 1; return }
 
-            for folder in folders where !(perFolder[folder]?.contains(name) ?? false) {
+            for folder in folders {
+                let have = perFolder[folder]?[name]
+                // 이미 같은(또는 더 최신) 사본이 있으면 손대지 않는다. mtime 을 맞춰 복사하므로
+                // 오차는 마이크로초 단위 — 10ms 안이면 같은 것으로 본다.
+                if let have, b.index.modified.timeIntervalSince(have) < 0.01 { continue }
                 // 실행 중인 창의 폴더는 건너뛴다(위 설명 참고 — 지금 넣어도 안 보이고 깜빡임만 생긴다).
                 if skipWriteTo.contains(folder.standardizedFileURL.path) { report.deferredRunning += 1; continue }
-                if atomicCopy(from: b.index.url, to: folder.appending(path: name)) { report.copied += 1 }
-                else { report.failed += 1 }
+                if atomicCopy(from: b.index.url, to: folder.appending(path: name), mtime: b.index.modified) {
+                    if have == nil { report.copied += 1 } else { report.updated += 1 }
+                } else { report.failed += 1 }
             }
         } }
         if report.skippedDead > 0 {
@@ -80,7 +90,7 @@ enum SessionSync {
     /// 여기서 JSON 을 다시 파싱하지 않는다 — 호출 전에 `SessionIndex.load` 로 이미 파싱에 성공한
     /// 파일만 넘어오기 때문이다. 파일당 50KB 를 재파싱하면 사본 수천 개를 만들 때 순간 메모리가
     /// GB 단위로 튄다(실측 1.1GB). 대신 반쪽 파일만 값싸게 걸러낸다.
-    private static func atomicCopy(from src: URL, to dest: URL) -> Bool {
+    private static func atomicCopy(from src: URL, to dest: URL, mtime: Date) -> Bool {
         let fm = FileManager.default
         guard let data = try? Data(contentsOf: src, options: .mappedIfSafe),
               data.count > 2, data.last == UInt8(ascii: "}") else { return false }
@@ -89,6 +99,8 @@ enum SessionSync {
             try data.write(to: tmp, options: .atomic)
             if fm.fileExists(atPath: dest.path) { _ = try fm.replaceItemAt(dest, withItemAt: tmp) }
             else { try fm.moveItem(at: tmp, to: dest) }
+            // 사본의 mtime 을 원본과 같게 — '최신본' 판정이 흔들리지 않도록
+            try? fm.setAttributes([.modificationDate: mtime], ofItemAtPath: dest.path)
             return true
         } catch {
             try? fm.removeItem(at: tmp)

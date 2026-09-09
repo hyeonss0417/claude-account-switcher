@@ -17,11 +17,11 @@ final class SyncEngine {
 
     struct Result {
         var copied = 0
+        var updated = 0              // 더 최신본으로 갈아끼운 수(아카이브·제목 변경 전파)
         var skippedDead = 0
         var quarantined = 0
         var deduped = 0              // 같은 대화를 두 번 가리키던 중복 인덱스 정리
-        var lockHeld = 0
-        var lockReleased = 0
+        var foldersRestored = 0      // 링크였던 세션 폴더를 실제 폴더로 되돌린 수
         var orphansRecovered = 0     // 인덱스가 유실됐다 되살린 세션 수
         var deferredRunning = 0      // 실행 중인 창이라 미룬 복사(종료/재실행 때 반영)
         var skipped = false          // 최소 간격/중복 실행으로 건너뜀
@@ -55,10 +55,12 @@ final class SyncEngine {
     /// 동기화 요청. `force` 면 최소 간격을 무시한다(사용자가 직접 누른 경우).
     /// - Parameter skipWriteTo: 읽기만 하고 **쓰지 않을** 폴더(실행 중인 창). Claude 는 시작 시에만
     ///   폴더를 읽으므로, 실행 중인 창에 넣어도 안 보이고 사이드바 그룹만 잠시 쪼개진다.
-    /// - Parameter rawFolders: 링크를 해석하지 않은 `<acct>/<org>` 경로들. 공유 모드에서
-    ///   새로 생긴 실제 폴더를 링크로 흡수하는 데 쓴다(비우면 흡수하지 않는다).
+    /// - Parameters:
+    ///   - rawFolders: 링크를 해석하지 않은 `<acct>/<org>` 경로들 — 링크로 남은 폴더를 찾는 데 쓴다.
+    ///   - keepFolders: 그중 실제 폴더로 되살릴(창이 쓰는) 것들.
     func request(folders: @escaping () -> [URL],
                  rawFolders: @escaping () -> [URL] = { [] },
+                 keepFolders: @escaping () -> Set<String> = { [] },
                  autoClean: Bool,
                  force: Bool = false,
                  skipWriteTo: @escaping () -> Set<String> = { [] },
@@ -82,10 +84,8 @@ final class SyncEngine {
             var result = Result()
             // 파일을 대량으로 다루는 구간은 반드시 오토릴리즈 풀로 감싼다.
             autoreleasepool {
-                // 공유 모드라면 새 계정·새 조직 폴더를 먼저 실체에 붙인다. 안 그러면 아래 복사가
-                // 그 폴더를 별도 사본으로 채워 버린다(실측: 새 계정 폴더에 429개 사본).
-                let absorbed = LinkMode.absorbNewFolders(rawFolders: rawFolders(), runningFolders: skipWriteTo())
-                if absorbed > 0 { Log.info("공유 모드: 새 폴더 \(absorbed)개 링크로 흡수") }
+                // 링크로 남은 세션 폴더가 있으면 먼저 실제 폴더로 되돌린다(Claude 1.49+ 는 링크에 저장 못 함).
+                result.foldersRestored = LinkMode.restoreRealFolders(rawFolders: rawFolders(), keep: keepFolders())
                 let f = folders()
                 guard f.count > 1 else { return }
 
@@ -99,12 +99,9 @@ final class SyncEngine {
 
                 let r = SessionSync.syncAll(folders: f, skipWriteTo: skipWriteTo())
                 result.copied = r.copied
+                result.updated = r.updated
                 result.skippedDead = r.skippedDead
                 result.deferredRunning = r.deferredRunning
-
-                // 잠금은 **창이 뜨는 순간에만** 의미가 있다(Claude 는 시작할 때 한 번만 폴더를 읽는다).
-                // 그래서 상시 잠금은 하지 않고, 조용해진 보류본을 되돌리는 일만 한다.
-                result.lockReleased = SessionLock.releaseIdleAll(folders: f)
 
                 // 인덱스가 유실된 세션 되살리기 —
                 // Claude 가 비정상 종료되면 세션은 로그만 남고 목록에서 사라진다.
