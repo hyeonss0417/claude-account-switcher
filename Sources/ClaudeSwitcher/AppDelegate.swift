@@ -111,12 +111,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // 어느 창이 왜 닫혔는지 남긴다(크래시 덤프가 안 남는 종료를 사후 추적하기 위해).
                     let label = self?.windowLabels[pid] ?? "알 수 없는 창"
                     let up = self?.windowStarts[pid].map { Date().timeIntervalSince($0) }
-                    CrashWatch.recordTermination(label: label, pid: pid, uptime: up ?? nil)
-                    let acct = self?.windowAccounts[pid]
+                    let key = self?.windowKeys[pid]
                     self?.windowLabels[pid] = nil
                     self?.windowStarts[pid] = nil
-                    self?.windowAccounts[pid] = nil
-                    if let acct { self?.reopenAfterUnexpectedQuit(accountUuid: acct, label: label) }
+                    self?.windowKeys[pid] = nil
+                    self?.handleWindowQuit(pid: pid, label: label, uptime: up ?? nil, key: key)
                 }
                 // 종료 시점에는 그 창의 폴더에도 채워 넣어야 다음 실행에서 전부 보인다.
                 self?.runSyncInBackground(quiet: true, includeRunning: !launched)
@@ -133,6 +132,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         // 복구 뒤엔 같은 대화를 두 번 가리키는 인덱스가 생길 수 있어 곧바로 접는다.
                         SessionSync.dedupeDuplicates(folders: folders)
                     }
+                }
+            }
+        }
+    }
+
+    /// 창 하나가 닫혔을 때: **자동 업데이트 때문인지 먼저 가린다.**
+    ///
+    /// 업데이트 설치는 창이 전부 닫혀야 성공한다. 그래서 업데이트 종료면 '자동으로 다시 열기'
+    /// 설정과 무관하게 협조 재시작을 한다 — 예전엔 이 처리가 그 설정 뒤에 묶여 있어서, 설정을 끄자
+    /// 설치가 매번 실패하고 Claude 가 한 시간마다 창을 다시 꺼 세션이 반복해서 끊겼다.
+    private func handleWindowQuit(pid: pid_t, label: String, uptime: TimeInterval?, key: String?) {
+        if updateRestartInProgress {
+            if let key { pendingRelaunch.insert(key) }
+            CrashWatch.recordTermination(label: label, pid: pid, uptime: uptime, cause: "업데이트 설치")
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // 요청한 창이 닫히면 설치기는 1초 안에 설치를 시작한다(실측). 몇 초만 지켜보면 가려진다.
+            var byUpdate = CrashWatch.wasUpdateQuit(within: 60)
+            let deadline = Date().addingTimeInterval(6)
+            while !byUpdate, Date() < deadline {
+                if UpdateWatch.isInstalling { byUpdate = true; break }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                CrashWatch.recordTermination(label: label, pid: pid, uptime: uptime,
+                                             cause: byUpdate ? "Claude 자동 업데이트" : nil)
+                if byUpdate {
+                    self.coordinatedUpdateRestart(including: key.map { [$0] } ?? [], reason: "Claude 자동 업데이트")
+                } else if let key, key != InstanceManager.defaultKey {
+                    self.reopenAfterUnexpectedQuit(accountUuid: key, label: label)
                 }
             }
         }
@@ -157,66 +188,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         history.append(now)
         relaunchHistory[accountUuid] = history
 
-        // 로그상 업데이트 종료가 아니어도, 업데이터(ShipIt)가 돌고 있으면 같은 상황이다.
-        // 여기서 5초 만에 창을 되살리면 새 프로세스가 번들을 잠가 설치가 또 실패한다
-        // (실측: 8/16~9/02 설치 실패의 마지막 원인이 바로 이 조기 재실행이었다).
-        let byUpdate = CrashWatch.wasUpdateQuit() || CrashWatch.updaterRunning()
-        Log.info("자동 복구 예약: \(label) — 원인 \(byUpdate ? "자동 업데이트" : "불명")")
-        if byUpdate {
-            coordinatedUpdateRestart(triggeredBy: accountUuid, label: label)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                guard let self else { return }
-                let dir = InstanceManager.dataDir(for: accountUuid).standardizedFileURL.path
-                if InstanceManager.runningDataDirs()[dir] != nil {
-                    Log.info("자동 복구 생략(\(label)): 이미 실행 중")
-                    return
-                }
-                self.syncThenLaunch(accountUuid: accountUuid, quitFirst: nil, label: "\(label) (자동 복구)")
+        Log.info("자동 복구 예약: \(label) — 원인 불명")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            let dir = InstanceManager.dataDir(for: accountUuid).standardizedFileURL.path
+            if InstanceManager.runningDataDirs()[dir] != nil {
+                Log.info("자동 복구 생략(\(label)): 이미 실행 중")
+                return
             }
+            self.syncThenLaunch(accountUuid: accountUuid, quitFirst: nil, label: "\(label) (자동 복구)")
         }
     }
 
     /// 업데이트를 **성공시키기 위한** 협조 재시작.
     ///
-    /// 문제의 구조: 여러 인스턴스가 같은 앱 번들을 공유한다. 한 창이 업데이트하려고 꺼져도
-    /// 다른 창이 번들을 잡고 있으면 교체가 실패하고("Update didn't complete"), 우리 자동 복구가
-    /// 20초 만에 창을 되살려 업데이터를 계속 방해했다 — 실측: 8/16 이후 설치가 한 번도 성공하지
-    /// 못해 설치본과 스테이징 버전이 8단계나 벌어졌다.
-    /// 그래서 업데이트로 인한 종료가 감지되면: 남은 창도 전부 닫고 → 설치가 끝날 때까지 기다린 뒤
-    /// → 닫았던 창을 모두 되살린다.
+    /// 여러 인스턴스가 같은 앱 번들을 쓴다. 한 창이 업데이트하려고 꺼져도 다른 창이 남아 있거나
+    /// 설치 도중 새 창이 뜨면 설치기가 "App Still Running Error" 로 포기한다(실측 9/14 02:49:23 —
+    /// 사용자가 재시작한 창을 우리가 설치 3초 만에 다시 띄운 것이 원인). 그러면 업데이트가 계속
+    /// 대기로 남고, Claude 는 유휴 10분마다 창을 또 끈다.
+    /// 그래서: 남은 창을 모두 닫고 → 설치가 시작·완료될 때까지 기다린 뒤 → 닫혔던 창을 전부 되살린다.
+    /// 되살리는 동안 들어오는 종료·실행 요청은 `pendingRelaunch` 에 모았다가 한꺼번에 처리한다.
     private var updateRestartInProgress = false
-    private func coordinatedUpdateRestart(triggeredBy: String, label: String) {
+    private var pendingRelaunch = Set<String>()
+
+    private func coordinatedUpdateRestart(including: Set<String>, reason: String) {
+        pendingRelaunch.formUnion(including)
         guard !updateRestartInProgress else { return }
         updateRestartInProgress = true
-        setStatus("Claude 업데이트 감지 — 모든 창을 재시작합니다")
+        let before = UpdateWatch.installedVersion()
+        setStatus("\(reason) — 설치를 위해 Claude 창을 모두 잠시 닫습니다")
 
-        // 1) 아직 떠 있는 창들 파악(전부 되살릴 목록) + 협조 종료
-        var accounts = Set([triggeredBy])
         let running = InstanceManager.runningDataDirs()
-        for (dirPath, pid) in running {
-            if let a = WebSession.loggedInAccount(dataDir: URL(fileURLWithPath: dirPath)) { accounts.insert(a) }
-            CrashWatch.markIntentionalQuit(seconds: 240)
-            InstanceManager.quitAndWait(pid: pid)
+        for dirPath in running.keys {
+            if let k = windowKey(forDataDir: dirPath) { pendingRelaunch.insert(k) }
         }
-        Log.info("업데이트 협조 재시작: \(accounts.count)개 창 종료, 설치 대기")
+        CrashWatch.markIntentionalQuit(seconds: 300)
+        let pids = Array(running.values)
+        for pid in pids { NSRunningApplication(processIdentifier: pid)?.terminate() }
+        Log.info("업데이트 협조 재시작(\(reason)): 창 \(pids.count)개 종료 요청, 설치 대기")
 
-        // 2) 업데이터가 끝나기를 기다렸다가(최대 3분) 전부 되살린다
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let deadline = Date().addingTimeInterval(180)
-            Thread.sleep(forTimeInterval: 10)                       // 설치 시작 여유
-            while Date() < deadline, CrashWatch.updaterRunning() {
-                Thread.sleep(forTimeInterval: 5)
-            }
-            Thread.sleep(forTimeInterval: 3)
+            // 창이 모두 닫히기를 기다린다. 25초 뒤에도 남으면 강제 종료 — 하나라도 남으면 설치가 취소된다.
+            let deadline = Date().addingTimeInterval(25)
+            while Date() < deadline, pids.contains(where: { kill($0, 0) == 0 }) { Thread.sleep(forTimeInterval: 0.25) }
+            for pid in pids where kill(pid, 0) == 0 { NSRunningApplication(processIdentifier: pid)?.forceTerminate() }
+
+            let started = UpdateWatch.waitForInstall(startWithin: 20, timeout: 300)
+            let after = UpdateWatch.installedVersion()
             DispatchQueue.main.async {
-                self?.updateRestartInProgress = false
-                for a in accounts {
-                    self?.syncThenLaunch(accountUuid: a, quitFirst: nil, label: "업데이트 후 복구")
-                }
-                Log.info("업데이트 협조 재시작 완료: \(accounts.count)개 창 복귀")
+                guard let self else { return }
+                let keys = self.pendingRelaunch
+                self.pendingRelaunch = []
+                self.updateRestartInProgress = false
+                let result = after != before ? "설치 완료 \(before) → \(after)"
+                    : (started ? "설치 실패(\(after) 그대로)" : "설치가 시작되지 않음")
+                Log.info("업데이트 협조 재시작: \(result) — 창 \(keys.count)개 복귀")
+                for k in keys.sorted() { self.relaunchWindow(key: k) }
+                self.setStatus("Claude 업데이트: \(result)")
+                self.populateMenu()
             }
         }
+    }
+
+    /// 데이터 디렉터리 → 창 식별자(계정 UUID, 기본 창이면 defaultKey). 임시 로그인 창은 nil.
+    private func windowKey(forDataDir dirPath: String) -> String? {
+        if dirPath == Paths.appSupportClaude.standardizedFileURL.path { return InstanceManager.defaultKey }
+        let name = URL(fileURLWithPath: dirPath).lastPathComponent
+        return name.hasPrefix("pending-") ? nil : name
+    }
+
+    /// 닫혔던 창을 원래 데이터 디렉터리로 되살린다.
+    private func relaunchWindow(key: String) {
+        if key == InstanceManager.defaultKey {
+            guard InstanceManager.runningDataDirs()[Paths.appSupportClaude.standardizedFileURL.path] == nil else { return }
+            let t = Process()
+            t.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            t.arguments = ["-n", "-a", "/Applications/Claude.app"]     // 인자 없음 = 기본 데이터 디렉터리
+            try? t.run()
+            Log.info("기본 창 실행(업데이트 후)")
+            return
+        }
+        let label = manager.profiles.first { $0.accountUuid == key }?.displayLabel ?? String(key.prefix(8))
+        syncThenLaunch(accountUuid: key, quitFirst: nil, label: "\(label) (업데이트 후)")
+    }
+
+    /// 메뉴: 대기 중인 업데이트를 지금 설치(모든 창 재시작). Claude 가 유휴 시점에 알아서 창을 끄기 전에
+    /// 사용자가 편한 때를 고를 수 있게 한다.
+    @objc private func installUpdateNow() {
+        let running = InstanceManager.runningDataDirs()
+        let busy = running.values.reduce(0) { $0 + UpdateWatch.busySessions(windowPid: $1) }
+        let a = NSAlert()
+        a.messageText = "Claude \(UpdateWatch.stagedVersion() ?? "업데이트") 를 지금 설치할까요?"
+        a.informativeText = "열린 Claude 창 \(running.count)개를 모두 닫고 설치한 뒤 다시 엽니다(보통 30초 안팎).\n"
+            + (busy > 0 ? "⚠️ 지금 작업 중인 세션 \(busy)개가 있습니다 — 턴과 백그라운드 작업이 끊깁니다."
+                        : "지금 작업 중인 세션은 없습니다.")
+        if busy > 0 { a.addButton(withTitle: "나중에"); a.addButton(withTitle: "지금 설치") }
+        else { a.addButton(withTitle: "지금 설치"); a.addButton(withTitle: "나중에") }
+        NSApp.activate(ignoringOtherApps: true)
+        let r = a.runModal()
+        let install = busy > 0 ? r == .alertSecondButtonReturn : r == .alertFirstButtonReturn
+        guard install else { return }
+        coordinatedUpdateRestart(including: [], reason: "Claude 업데이트 설치")
     }
 
     /// 죽은 인덱스를 동기화 때마다 자동 격리할지. 켜두면 계정 간 세션 수가 항상 같게 유지된다.
@@ -229,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// pid → 어느 계정 창인지. 프로세스가 사라진 뒤에는 알아낼 수 없어 미리 캐시해 둔다.
     private var windowLabels: [pid_t: String] = [:]
     private var windowStarts: [pid_t: Date] = [:]
-    private var windowAccounts: [pid_t: String] = [:]      // pid → 계정 UUID(인스턴스 창일 때)
+    private var windowKeys: [pid_t: String] = [:]          // pid → 계정 UUID(인스턴스 창) 또는 defaultKey
     private var relaunchHistory: [String: [Date]] = [:]    // 계정별 자동 복구 이력(폭주 방지)
 
     /// 창이 닫히면 자동으로 다시 열지. 기본 켜짐.
@@ -246,9 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let label = acct.flatMap { a in manager.profiles.first { $0.accountUuid == a }?.displayLabel }
                 ?? URL(fileURLWithPath: dirPath).lastPathComponent
             windowLabels[pid] = label
-            if let a = acct, InstanceManager.dataDir(for: a).standardizedFileURL.path == URL(fileURLWithPath: dirPath).standardizedFileURL.path {
-                windowAccounts[pid] = a           // 인스턴스 창 → 자동 복구 대상
-            }
+            if let key = windowKey(forDataDir: dirPath) { windowKeys[pid] = key }
             if windowStarts[pid] == nil {
                 windowStarts[pid] = NSRunningApplication(processIdentifier: pid)?.launchDate ?? Date()
             }
@@ -401,6 +471,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.state = isUp ? .on : .off
             menu.addItem(item)
         }
+        if case .staged = UpdateWatch.phase() {
+            addItem(to: menu, "⬆︎ Claude \(UpdateWatch.stagedVersion() ?? "업데이트") 설치 — 모든 창 재시작…", #selector(installUpdateNow))
+        }
         addItem(to: menu, "＋ 새 계정 추가…", #selector(addAccount))
         menu.addItem(.separator())
         addItem(to: menu, "지금 세션 동기화", #selector(syncNow), key: "s")
@@ -469,7 +542,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 copied = r.copied; updated = r.updated
             }
             SessionIndex.flushCaches()
+            // 업데이트 설치 중에 창을 띄우면 설치가 취소되고, Claude 가 다시 창을 끄는 악순환이 된다.
+            UpdateWatch.waitWhileInstalling(timeout: 300)
             DispatchQueue.main.async { [weak self] in
+                if let self, self.updateRestartInProgress {
+                    self.pendingRelaunch.insert(accountUuid)
+                    self.setStatus("\(label): 업데이트 설치가 끝나면 엽니다")
+                    return
+                }
                 InstanceManager.launch(accountUuid: accountUuid)
                 var msg = "\(label) 실행 — 세션 \(copied)개 반영, \(updated)개 갱신"
                 if revived > 0 { msg += ", 유실 \(revived)개 복구" }
@@ -491,17 +571,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let instDir = InstanceManager.dataDir(for: acct)
             let stale = InstanceManager.staleCount(pid: pid, sessionFolders: InstanceManager.sessionFolders(of: instDir))
             if stale > 0 {
+                let busy = UpdateWatch.busySessions(windowPid: pid)
                 let a = NSAlert()
                 a.messageText = "\(target.displayLabel) 창을 재시작할까요?"
                 a.informativeText = """
                     이 창이 시작한 뒤에 들어온 세션이 \(stale)개 있습니다.
                     Claude 는 시작할 때만 세션 목록을 읽기 때문에, 재시작해야 그 세션들이 보입니다.
-                    (진행 중인 작업이 있으면 먼저 저장하세요)
-                    """
-                a.addButton(withTitle: "재시작")
-                a.addButton(withTitle: "그냥 열기")
+                    """ + (busy > 0
+                        ? "\n⚠️ 이 창에서 지금 작업 중인 세션이 \(busy)개 있습니다 — 재시작하면 턴과 백그라운드 작업이 끊깁니다."
+                        : "\n이 창에서 지금 작업 중인 세션은 없습니다.")
+                // 작업 중이면 안전한 쪽(그냥 열기)을 기본 버튼으로 둔다 — Enter 한 번에 세션이 끊기지 않게.
+                if busy > 0 { a.addButton(withTitle: "그냥 열기"); a.addButton(withTitle: "재시작") }
+                else { a.addButton(withTitle: "재시작"); a.addButton(withTitle: "그냥 열기") }
                 NSApp.activate(ignoringOtherApps: true)
-                if a.runModal() == .alertFirstButtonReturn {
+                let r = a.runModal()
+                if busy > 0 ? r == .alertSecondButtonReturn : r == .alertFirstButtonReturn {
                     syncThenLaunch(accountUuid: acct, quitFirst: pid, label: target.displayLabel)
                     return
                 }

@@ -46,10 +46,13 @@ enum CrashWatch {
     }
 
     /// 종료된 창을 기록한다. `label` 은 어떤 계정 창이었는지.
-    static func recordTermination(label: String, pid: pid_t, uptime: TimeInterval?) {
+    /// - Parameter cause: 원인을 알면(예: 자동 업데이트) 사고로 기록하지 않고 그 원인으로 남긴다.
+    static func recordTermination(label: String, pid: pid_t, uptime: TimeInterval?, cause: String? = nil) {
         let mem = memorySnapshot()
         let up = uptime.map { String(format: "%.1f시간", $0 / 3600) } ?? "?"
-        if isIntentional() {
+        if let cause {
+            Log.info("창 종료(\(cause)): \(label) pid=\(pid) 실행 \(up) — \(mem)")
+        } else if isIntentional() {
             Log.info("창 종료(의도됨): \(label) pid=\(pid) 실행 \(up) — \(mem)")
         } else {
             Log.error("⚠️ 창이 예기치 않게 닫힘: \(label) pid=\(pid) 실행 \(up) — \(mem)")
@@ -80,41 +83,30 @@ enum CrashWatch {
 
     static var incidentFile: URL { Paths.appDir.appending(path: "unexpected-quits.log") }
 
-    /// 업데이터(ShipIt)가 아직 번들을 교체 중인가.
-    static func updaterRunning() -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        task.arguments = ["-f", "claudefordesktop.ShipIt"]
-        task.standardOutput = Pipe()
-        guard (try? task.run()) != nil else { return false }
-        task.waitUntilExit()
-        return task.terminationStatus == 0
-    }
-
     /// Claude 자체 로그를 보고 **자동 업데이트 때문에 종료된 것인지** 판별한다.
     ///
     /// 실측으로 확인된 원인: Claude 데스크탑은 유휴 상태가 되면 `stealth-update` 로 스스로 종료하고
     /// 업데이트를 설치한다. 그런데 `--user-data-dir` 로 띄운 계정 창은 그 뒤 **다시 살아나지 않는다**
     /// (업데이터의 재실행이 그 인자를 모른다). 사용자에겐 "쓰다가 앱이 꺼졌다"로 보인다.
     static func wasUpdateQuit(within seconds: TimeInterval = 180) -> Bool {
-        let log = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "Library/Logs/Claude/main.log")
-        guard let handle = try? FileHandle(forReadingFrom: log) else { return false }
-        defer { try? handle.close() }
-        // 로그가 크므로 끝부분만 본다.
-        let size = (try? handle.seekToEnd()) ?? 0
-        let window: UInt64 = 128 * 1024
-        try? handle.seek(toOffset: size > window ? size - window : 0)
-        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return false }
-
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
         fmt.locale = Locale(identifier: "en_US_POSIX")
         let cutoff = Date().addingTimeInterval(-seconds)
-        for line in text.split(separator: "\n").reversed() {
-            guard line.contains("stealth-update") || line.contains("beforeQuitForUpdate") else { continue }
-            let stamp = String(line.prefix(19))
-            if let d = fmt.date(from: stamp), d >= cutoff { return true }
+        // Claude 는 로그를 크기 기준으로 교체한다. 종료 순간에 교체되면(실측: 9/13 02:47:43) 그 줄은
+        // 직전 파일(main1.log)에 들어가므로 둘 다 본다.
+        for name in ["main.log", "main1.log"] {
+            let log = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Logs/Claude/\(name)")
+            guard let handle = try? FileHandle(forReadingFrom: log) else { continue }
+            defer { try? handle.close() }
+            let size = (try? handle.seekToEnd()) ?? 0
+            let window: UInt64 = 128 * 1024
+            try? handle.seek(toOffset: size > window ? size - window : 0)
+            let text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+            for line in text.split(separator: "\n").reversed() {
+                guard line.contains("stealth-update") || line.contains("beforeQuitForUpdate") else { continue }
+                if let d = fmt.date(from: String(line.prefix(19))), d >= cutoff { return true }
+            }
         }
         return false
     }

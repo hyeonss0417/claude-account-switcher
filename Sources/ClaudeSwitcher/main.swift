@@ -154,6 +154,24 @@ if cliArgs.contains("--stress") {
     exit(0)
 }
 
+/// 자동 업데이트 단계와 창별 작업 중 세션 수.
+if cliArgs.contains("--update-status") {
+    let phase = UpdateWatch.phase()
+    print("설치된 버전: \(UpdateWatch.installedVersion())")
+    switch phase {
+    case .none: print("업데이트: 대기 없음")
+    case .staged(let pid): print("업데이트: \(UpdateWatch.stagedVersion() ?? "?") 대기 중 (ShipIt pid \(pid), 창 종료를 기다림)")
+    case .installing(let pid): print("업데이트: 설치 중 (ShipIt pid \(pid))")
+    }
+    let m = AccountManager()
+    for (dir, pid) in InstanceManager.runningDataDirs().sorted(by: { $0.key < $1.key }) {
+        let acct = WebSession.loggedInAccount(dataDir: URL(fileURLWithPath: dir))
+        let label = acct.flatMap { a in m.profiles.first { $0.accountUuid == a }?.displayLabel } ?? URL(fileURLWithPath: dir).lastPathComponent
+        print("  창 \(label) pid=\(pid): 작업 중 세션 \(UpdateWatch.busySessions(windowPid: pid))개")
+    }
+    exit(0)
+}
+
 if cliArgs.contains("--settings") {
     let mgr = AccountManager()
     var dirs = [Paths.appSupportClaude]
