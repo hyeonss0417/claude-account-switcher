@@ -94,6 +94,7 @@ final class SyncEngine {
                 if doQuarantine {
                     result.quarantined = SessionSync.quarantineDeadIndexes(folders: f)
                     result.deduped = SessionSync.dedupeDuplicates(folders: f)
+                    result.quarantined += OrphanSessions.quarantineSubprocessIndexes(folders: f)
                     self.lastQuarantine = Date()
                 }
 

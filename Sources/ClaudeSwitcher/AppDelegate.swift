@@ -131,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         }
                         // 복구 뒤엔 같은 대화를 두 번 가리키는 인덱스가 생길 수 있어 곧바로 접는다.
                         SessionSync.dedupeDuplicates(folders: folders)
+                        OrphanSessions.quarantineSubprocessIndexes(folders: folders)
                     }
                 }
             }
@@ -537,6 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let orphans = OrphanSessions.find(folders: folders)
                 if !orphans.isEmpty { revived = OrphanSessions.recover(orphans, into: folders) }
                 SessionSync.dedupeDuplicates(folders: folders)   // 복구가 만든 중복은 창이 뜨기 전에 정리
+                OrphanSessions.quarantineSubprocessIndexes(folders: folders)   // claude -p 하위 작업은 목록에서 뺀다
                 // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
                 let r = SessionSync.syncAll(folders: self.syncFolders())   // 폴더 복원 뒤 다시 계산
                 copied = r.copied; updated = r.updated

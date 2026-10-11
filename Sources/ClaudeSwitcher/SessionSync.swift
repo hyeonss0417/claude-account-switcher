@@ -184,7 +184,7 @@ enum SessionSync {
             for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
                 guard let idx = SessionIndex.load(item) else { continue }
                 if idx.hasLiveLog || idx.locateLogAnywhere(index: logIndex) != nil { continue }
-                let sub = dest.appending(path: folder.lastPathComponent)
+                let sub = dest.appending(path: Paths.backupKey(for: folder))
                 try? fm.createDirectory(at: sub, withIntermediateDirectories: true)
                 if (try? fm.moveItem(at: item, to: sub.appending(path: item.lastPathComponent))) != nil { moved += 1 }
             }

@@ -14,6 +14,12 @@ import Foundation
 ///  - `gitBranch` — 브랜치
 /// 이 값들로 인덱스를 다시 만들면 목록에 그대로 돌아온다.
 ///
+/// **데스크탑에서 연 세션만 되살린다**(로그의 `entrypoint` 가 `claude-desktop`).
+/// 세션 안에서 `claude -p` 로 띄운 하위 작업(entrypoint `sdk-cli`)도 `~/.claude/projects` 에 같은 모양의
+/// 최상위 로그를 남기지만, Claude 는 그것들을 목록에 올리지 않는다 — 인덱스가 없는 게 정상이다.
+/// 예전엔 이걸 유실로 오인해 되살렸고, 자소서 작성 세션 하나가 띄운 하위 작업 17개가
+/// `scratch-2026-10-10-190e45`·`tmp` 라는 이름의 루트 세션으로 사이드바를 채웠다(2026-10-10~11).
+///
 /// 단, **방금까지 쓰이던 로그는 건드리지 않는다.** 그 세션을 쥔 창이 곧 자기 인덱스를 쓴다 —
 /// 먼저 만들면 같은 세션이 두 번 뜨고, 우리 제목이 그 창의 제목을 가린다.
 enum OrphanSessions {
@@ -41,6 +47,10 @@ enum OrphanSessions {
         return out
     }
 
+    /// 데스크탑에서 연 세션의 로그에 찍히는 entrypoint. (`claude -p`·SDK 는 `sdk-cli`/`sdk-ts`/`sdk-py`,
+    /// 터미널 CLI 는 `cli`)
+    static let desktopEntrypoint = "claude-desktop"
+
     /// 이 시간 안에 쓰인 로그는 아직 어느 창이 쥐고 있는 것으로 보고 복구하지 않는다.
     static let liveWindow: TimeInterval = 10 * 60
 
@@ -50,6 +60,7 @@ enum OrphanSessions {
         let indexed = indexedSessionIds(folders: folders)
         let now = Date()
         var out: [Found] = []
+        var taken = Set<String>()     // worktree 이름 변경 등으로 같은 세션 로그가 여러 폴더에 있으면 하나만
         guard let projects = try? fm.contentsOfDirectory(at: Paths.projectsDir, includingPropertiesForKeys: nil) else { return out }
 
         for dir in projects {
@@ -58,9 +69,10 @@ enum OrphanSessions {
                 autoreleasepool {
                     let sid = f.deletingPathExtension().lastPathComponent
                     let size = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                    guard size >= minBytes, !indexed.contains(sid) else { return }
+                    guard size >= minBytes, !indexed.contains(sid), !taken.contains(sid) else { return }
                     guard let info = probe(f) else { return }
                     if now.timeIntervalSince1970 * 1000 - info.last < liveWindow * 1000 { return }   // 진행 중
+                    taken.insert(sid)
                     out.append(Found(sessionId: sid, logURL: f, title: info.title, cwd: info.cwd,
                                      branch: info.branch, firstSeen: info.first, lastSeen: info.last, bytes: size))
                 }
@@ -86,6 +98,8 @@ enum OrphanSessions {
         // 사람이 실제로 대화한 세션인지 — 서브에이전트(sidechain) 로그는 목록에 뜨는 세션이 아니므로 제외.
         guard text.contains("\"type\":\"user\"") else { return nil }
         guard !text.contains("\"isSidechain\":true") else { return nil }
+        // 데스크탑이 띄운 세션만(위 설명). entrypoint 가 없는 아주 오래된 로그도 판별할 수 없으므로 건너뛴다.
+        guard SessionIndex.scanString(text, key: "entrypoint") == desktopEntrypoint else { return nil }
         if title.isEmpty { title = URL(fileURLWithPath: cwd).lastPathComponent }
 
         let iso = ISO8601DateFormatter()
@@ -127,6 +141,79 @@ enum OrphanSessions {
         }
         let s = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? nil : s
+    }
+
+    /// 세션 id → 로그의 entrypoint. 로그 앞부분은 바뀌지 않으므로 한 번 읽으면 계속 쓴다.
+    private static var entrypointCache: [String: String] = [:]
+    private static let entrypointLock = NSLock()
+
+    static func entrypoint(sessionId: String, log: URL) -> String? {
+        entrypointLock.lock()
+        if let hit = entrypointCache[sessionId] { entrypointLock.unlock(); return hit }
+        entrypointLock.unlock()
+        guard let h = try? FileHandle(forReadingFrom: log) else { return nil }
+        defer { try? h.close() }
+        guard let head = try? h.read(upToCount: 256 * 1024), !head.isEmpty else { return nil }
+        guard let e = SessionIndex.scanString(String(decoding: head, as: UTF8.self), key: "entrypoint") else { return nil }
+        entrypointLock.lock(); entrypointCache[sessionId] = e; entrypointLock.unlock()
+        return e
+    }
+
+    /// `claude -p`·SDK 로 띄운 **하위 작업 로그를 가리키는 인덱스**를 백업으로 격리한다.
+    ///
+    /// 데스크탑은 이런 로그로 인덱스를 만들지 않는다(실측: Claude 가 직접 쓴 인덱스 919개 모두
+    /// `claude-desktop`). 그러니 있다면 예전 복구가 만든 것이다. Claude 가 그 인덱스를 다시 저장하면
+    /// (아카이브·열람) `recoveredBy` 표식이 지워지므로 표식이 아니라 로그로 판별한다.
+    /// Claude 의 가져오기 기능이 만든 것(`importedFrom`)은 건드리지 않는다.
+    /// - Returns: 격리한 세션 수.
+    @discardableResult
+    static func quarantineSubprocessIndexes(folders: [URL]) -> Int {
+        let fm = FileManager.default
+        let logIndex = SessionIndex.buildLogIndex()
+        var doomed = Set<String>()        // 파일명
+        var titles: [String] = []
+        for folder in folders {
+            guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
+            for item in items where item.lastPathComponent.hasPrefix("local_") && item.pathExtension == "json" {
+                if doomed.contains(item.lastPathComponent) { continue }
+                autoreleasepool {
+                    guard let idx = SessionIndex.load(item), let sid = idx.sessionId else { return }
+                    let log: URL? = logIndex[sid] ?? idx.logURL.flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
+                    guard let log, let e = entrypoint(sessionId: sid, log: log), e.hasPrefix("sdk-") else { return }
+                    // 후보만 전체를 읽어 가져오기 흔적을 확인한다.
+                    guard let data = try? Data(contentsOf: item),
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          obj["importedFrom"] == nil else { return }
+                    doomed.insert(item.lastPathComponent)
+                    titles.append((obj["title"] as? String) ?? sid)
+                }
+            }
+        }
+        guard !doomed.isEmpty else { return 0 }
+        let dest = Paths.backupsDir.appending(path: "subprocess-\(stamp())")
+        for folder in folders {
+            let sub = dest.appending(path: Paths.backupKey(for: folder))
+            for name in doomed {
+                let f = folder.appending(path: name)
+                guard fm.fileExists(atPath: f.path) else { continue }
+                try? fm.createDirectory(at: sub, withIntermediateDirectories: true)
+                if (try? fm.moveItem(at: f, to: sub.appending(path: name))) == nil {
+                    // 이동이 실패해도 목록에서는 빼야 한다(다른 폴더 사본이 이미 백업돼 있다).
+                    Log.error("하위 작업 인덱스 이동 실패 → 삭제: \(name)")
+                    try? fm.removeItem(at: f)
+                }
+            }
+        }
+        let sample = Dictionary(grouping: titles, by: { $0 }).map { "\($0.key)×\($0.value.count)" }.sorted().prefix(5)
+        Log.info("하위 작업(claude -p) 인덱스 \(doomed.count)개 격리 → \(dest.lastPathComponent): \(sample.joined(separator: ", "))")
+        return doomed.count
+    }
+
+    private static func stamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.string(from: Date())
     }
 
     /// 우리가 복구한 인덱스의 제목을 로그의 마지막 custom-title 로 바로잡는다.

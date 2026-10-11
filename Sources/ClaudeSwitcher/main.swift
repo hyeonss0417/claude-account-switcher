@@ -105,6 +105,14 @@ if cliArgs.contains("--retitle") {
     exit(0)
 }
 
+/// `claude -p` 하위 작업 로그를 가리키는 인덱스를 격리한다(예전 복구가 루트 세션으로 만든 것).
+if cliArgs.contains("--clean-subprocess") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid), profiles: m.profiles)
+    print("하위 작업 인덱스 격리: \(OrphanSessions.quarantineSubprocessIndexes(folders: folders))개 (백업 폴더 subprocess-*)")
+    exit(0)
+}
+
 if cliArgs.contains("--find-orphans") || cliArgs.contains("--recover-orphans") {
     let m = AccountManager()
     let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid),

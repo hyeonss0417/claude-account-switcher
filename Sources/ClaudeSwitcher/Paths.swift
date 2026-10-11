@@ -44,4 +44,14 @@ enum Paths {
         try? fm.createDirectory(at: appDir, withIntermediateDirectories: true)
         try? fm.createDirectory(at: backupsDir, withIntermediateDirectories: true)
     }
+
+    /// 세션 폴더를 백업 하위 폴더 이름으로. 기본 창과 계정 인스턴스는 `<계정>/<조직>` 이 같을 수 있어
+    /// 그것만으로 이름을 지으면 충돌한다 — 실측: 두 번째 폴더의 이동이 조용히 실패해 정리가 안 됐다.
+    static func backupKey(for folder: URL) -> String {
+        let comps = folder.standardizedFileURL.pathComponents
+        var owner = "default"
+        if let i = comps.firstIndex(of: "instances"), i + 1 < comps.count { owner = String(comps[i + 1].prefix(8)) }
+        let acct = folder.deletingLastPathComponent().lastPathComponent.prefix(8)
+        return "\(owner)_\(acct)_\(folder.lastPathComponent.prefix(8))"
+    }
 }
