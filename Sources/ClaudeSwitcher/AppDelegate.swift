@@ -539,6 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if !orphans.isEmpty { revived = OrphanSessions.recover(orphans, into: folders) }
                 SessionSync.dedupeDuplicates(folders: folders)   // 복구가 만든 중복은 창이 뜨기 전에 정리
                 OrphanSessions.quarantineSubprocessIndexes(folders: folders)   // claude -p 하위 작업은 목록에서 뺀다
+                TranscriptRelocation.repair(folders: folders)   // 다른 창이 worktree 를 옮긴 세션은 새 위치로
                 // 종료된 창의 폴더이므로 skipWriteTo 없이 전부 채운다.
                 let r = SessionSync.syncAll(folders: self.syncFolders())   // 폴더 복원 뒤 다시 계산
                 copied = r.copied; updated = r.updated

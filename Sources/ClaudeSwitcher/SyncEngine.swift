@@ -21,7 +21,8 @@ final class SyncEngine {
         var skippedDead = 0
         var quarantined = 0
         var deduped = 0              // 같은 대화를 두 번 가리키던 중복 인덱스 정리
-        var foldersRestored = 0      // 링크였던 세션 폴더를 실제 폴더로 되돌린 수
+        var foldersRestored = 0
+        var relinked = 0             // 옮겨간 대화 로그로 다시 이은 인덱스 수      // 링크였던 세션 폴더를 실제 폴더로 되돌린 수
         var orphansRecovered = 0     // 인덱스가 유실됐다 되살린 세션 수
         var deferredRunning = 0      // 실행 중인 창이라 미룬 복사(종료/재실행 때 반영)
         var skipped = false          // 최소 간격/중복 실행으로 건너뜀
@@ -88,6 +89,10 @@ final class SyncEngine {
                 result.foldersRestored = LinkMode.restoreRealFolders(rawFolders: rawFolders(), keep: keepFolders())
                 let f = folders()
                 guard f.count > 1 else { return }
+
+                // worktree 이동으로 로그가 옮겨간 세션을 먼저 바로잡는다. 고친 판이 최신이 되므로
+                // 아래 복사가 옛 cwd 판을 덮는다(반대 순서면 옛 판이 퍼진다).
+                result.relinked = TranscriptRelocation.repair(folders: f).count
 
                 let doQuarantine = autoClean &&
                     Date().timeIntervalSince(self.lastQuarantine) > self.quarantineInterval

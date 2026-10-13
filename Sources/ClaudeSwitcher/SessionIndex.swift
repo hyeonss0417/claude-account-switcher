@@ -98,7 +98,9 @@ struct SessionIndex {
         guard let r = text.range(of: "\"\(key)\":\"") else { return nil }
         let rest = text[r.upperBound...]
         guard let end = rest.firstIndex(of: "\"") else { return nil }
-        let value = String(rest[..<end])
+        // JSONSerialization 은 `/` 를 `\/` 로 쓴다(우리가 기록한 인덱스). 풀지 않으면 경로 비교가 어긋나
+        // 로그 위치를 엉뚱하게 계산한다.
+        let value = String(rest[..<end]).replacingOccurrences(of: "\\/", with: "/")
         return value.isEmpty ? nil : value
     }
 

@@ -105,6 +105,21 @@ if cliArgs.contains("--retitle") {
     exit(0)
 }
 
+/// worktree 이동으로 대화 로그가 옮겨간 세션의 인덱스를 로그가 있는 곳으로 다시 잇는다.
+/// `--relink --dry-run` 이면 고칠 대상만 보여준다.
+if cliArgs.contains("--relink") {
+    let m = AccountManager()
+    let folders = InstanceManager.allSessionFolders(knownAccounts: m.profiles.map(\.accountUuid), profiles: m.profiles)
+    let dry = cliArgs.contains("--dry-run")
+    let fixes = TranscriptRelocation.repair(folders: folders, dryRun: dry)
+    var seen = Set<String>()
+    for f in fixes where seen.insert(f.file).inserted {
+        print("  · \(f.title)\n      \(f.from)\n    → \(f.to)")
+    }
+    print("\(dry ? "고칠 대상" : "재연결 완료"): 세션 \(seen.count)개 (인덱스 파일 \(fixes.count)개)")
+    exit(0)
+}
+
 /// `claude -p` 하위 작업 로그를 가리키는 인덱스를 격리한다(예전 복구가 루트 세션으로 만든 것).
 if cliArgs.contains("--clean-subprocess") {
     let m = AccountManager()
